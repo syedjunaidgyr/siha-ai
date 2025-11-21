@@ -100,22 +100,34 @@ class VitalSignsAnalysisService:
         import gc
         
         start_time = time.time()
-        print(f"[VitalSigns] Starting video frame analysis: {len(frames)} frames")
+        total_frame_count = len(frames)
+        print(f"[VitalSigns] Starting video frame analysis: {total_frame_count} frames")
         
         if not frames or len(frames) == 0:
             raise ValueError("No frames provided")
         
         # First pass: detect faces and extract ROIs from all frames
+        # Process frames incrementally to minimize memory usage
         rois = []
         face_detected_count = 0
         total_quality_score = 0
         bounding_boxes = []
         
-        for i, frame_bytes in enumerate(frames):
+        # Limit frame processing to prevent memory issues
+        MAX_FRAMES_TO_PROCESS = 12
+        frames_to_process = frames[:MAX_FRAMES_TO_PROCESS] if len(frames) > MAX_FRAMES_TO_PROCESS else frames
+        frames_processed = len(frames_to_process)
+        
+        if len(frames) > MAX_FRAMES_TO_PROCESS:
+            print(f"[VitalSigns] Limiting frame processing from {len(frames)} to {MAX_FRAMES_TO_PROCESS} frames for memory efficiency")
+        
+        for i, frame_bytes in enumerate(frames_to_process):
             try:
                 # Validate frame quality
                 quality_check = self.face_detection_service.validate_frame_quality(frame_bytes)
                 if not quality_check['isValid'] and quality_check['score'] == 0:
+                    # Explicitly delete frame_bytes reference to help GC
+                    del frame_bytes
                     continue
                 
                 total_quality_score += quality_check['score']
@@ -123,36 +135,57 @@ class VitalSignsAnalysisService:
                 # Detect face
                 face_result = self.face_detection_service.detect_face(frame_bytes)
                 if not face_result.get('detected'):
+                    del frame_bytes
                     continue
                 
                 face_detected_count += 1
                 bounding_boxes.append(face_result['boundingBox'])
                 
-                # Extract ROI
+                # Extract ROI (this creates a new smaller buffer)
                 try:
                     roi_bytes = self.face_detection_service.extract_roi(
                         frame_bytes,
                         face_result['boundingBox']
                     )
                     rois.append(roi_bytes)
+                    # Delete original frame after extracting ROI to free memory
+                    del frame_bytes
+                    # Don't delete roi_bytes - it's needed in the rois list
                 except Exception as e:
                     print(f"[VitalSigns] ROI extraction failed for frame {i+1}: {str(e)}")
+                    del frame_bytes
                     continue
                 
-                # Periodic garbage collection every 5 frames to manage memory
-                if (i + 1) % 5 == 0:
+                # Aggressive garbage collection every 3 frames to manage memory
+                if (i + 1) % 3 == 0:
                     gc.collect()
                     
+            except MemoryError as me:
+                print(f"[VitalSigns] Memory error processing frame {i+1}: {str(me)}")
+                gc.collect()
+                # Stop processing if we hit memory limits
+                break
             except Exception as e:
                 print(f"[VitalSigns] Error processing frame {i+1}: {str(e)}")
                 continue
+            finally:
+                # Ensure frame_bytes is deleted even if exception occurs
+                if 'frame_bytes' in locals():
+                    del frame_bytes
         
-        # Final garbage collection after processing all frames
+        # Clear frames list reference to help GC
+        del frames_to_process
+        del frames
+        
+        # Final aggressive garbage collection after processing all frames
         gc.collect()
         
-        if len(rois) < 10:  # Need at least 10 frames for temporal analysis
+        # Minimum frames needed for temporal analysis (reduced from 10 to 5 for flexibility)
+        MIN_FRAMES_FOR_TEMPORAL = 5
+        if len(rois) < MIN_FRAMES_FOR_TEMPORAL:
             print(f"[VitalSigns] Not enough valid frames ({len(rois)}), using fallback")
-            return self._fallback_analysis(frames, face_detected_count, total_quality_score)
+            # Use safe fallback that doesn't require frames array
+            return self._fallback_analysis_safe(face_detected_count, total_quality_score, total_frame_count)
         
         print(f"[VitalSigns] Extracted {len(rois)} valid ROIs for temporal analysis")
         
@@ -178,7 +211,7 @@ class VitalSignsAnalysisService:
             
             if len(signals['red']) < 10:
                 print(f"[VitalSigns] Not enough signals extracted: {len(signals['red'])}")
-                return self._fallback_analysis(frames, face_detected_count, total_quality_score)
+                return self._fallback_analysis_safe(face_detected_count, total_quality_score, total_frame_count)
             
             # Log raw signal statistics
             print(f"[VitalSigns] Raw signal stats - Red: mean={np.mean(signals['red']):.2f}, std={np.std(signals['red']):.2f}, range={np.max(signals['red'])-np.min(signals['red']):.2f}")
@@ -189,7 +222,7 @@ class VitalSignsAnalysisService:
             signal_quality = self._validate_signal_quality(signals)
             if not signal_quality['isValid']:
                 print(f"[VitalSigns] Signal quality check failed: {signal_quality['reason']}")
-                return self._fallback_analysis(frames, face_detected_count, total_quality_score)
+                return self._fallback_analysis_safe(face_detected_count, total_quality_score, total_frame_count)
             
             # Advanced signal preprocessing with interpolation for low frame rates
             red_signal = self._preprocess_signal(signals['red'], sensor_data, fps=actual_fps)
@@ -224,12 +257,12 @@ class VitalSignsAnalysisService:
             print(f"[VitalSigns] Error in temporal analysis: {str(e)}")
             import traceback
             traceback.print_exc()
-            return self._fallback_analysis(frames, face_detected_count, total_quality_score)
+            return self._fallback_analysis_safe(face_detected_count, total_quality_score, total_frame_count)
         
         # Calculate confidence
         avg_quality_score = total_quality_score / face_detected_count if face_detected_count > 0 else 0
         confidence = self._calculate_confidence(
-            face_detected_count / len(frames),
+            face_detected_count / total_frame_count if total_frame_count > 0 else 0,
             avg_quality_score,
             heart_rate,
             stress_level,
@@ -243,8 +276,8 @@ class VitalSignsAnalysisService:
         result = {
             'faceDetected': face_detected_count > 0,
             'validFrames': len(rois),
-            'totalFrames': len(frames),
-            'frameCount': len(frames),  # Alias for compatibility
+            'totalFrames': total_frame_count,
+            'frameCount': total_frame_count,  # Alias for compatibility
             'vitals': {
                 'heartRate': heart_rate,
                 'stressLevel': stress_level,
@@ -262,6 +295,29 @@ class VitalSignsAnalysisService:
         
         print(f"[VitalSigns] ✓ Video analysis complete: {result}")
         return result
+    
+    def _fallback_analysis_safe(self, face_count: int, quality_score: float, total_frames: int) -> Dict:
+        """Safe fallback analysis when not enough frames or memory issues"""
+        avg_quality_score = quality_score / face_count if face_count > 0 else 0
+        
+        return {
+            'faceDetected': face_count > 0,
+            'validFrames': 0,
+            'totalFrames': total_frames,
+            'frameCount': total_frames,
+            'vitals': {
+                'heartRate': None,
+                'stressLevel': None,
+                'oxygenSaturation': None,
+                'respiratoryRate': None,
+                'temperature': None,
+                'bloodPressure': {'systolic': None, 'diastolic': None},
+                'confidence': 0.3,
+                'timestamp': time.time() * 1000
+            },
+            'confidence': '0.30',
+            'avgQualityScore': f"{avg_quality_score:.1f}"
+        }
     
     def _fallback_analysis(self, frames: List[bytes], face_count: int, quality_score: float) -> Dict:
         """Fallback to per-frame analysis if temporal analysis fails"""

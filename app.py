@@ -95,9 +95,15 @@ def analyze_video():
         if not frames_base64 or not isinstance(frames_base64, list):
             return jsonify({'error': 'No frames provided'}), 400
         
-        # Warn if too many frames (may cause memory issues)
-        if len(frames_base64) > 20:
-            print(f"[AI Route] WARNING: Large number of frames ({len(frames_base64)}). This may cause memory or timeout issues.")
+        # Limit frame count to prevent memory issues
+        MAX_FRAMES = 12
+        if len(frames_base64) > MAX_FRAMES:
+            print(f"[AI Route] WARNING: Frame count ({len(frames_base64)}) exceeds maximum ({MAX_FRAMES}). Using first {MAX_FRAMES} frames.")
+            frames_base64 = frames_base64[:MAX_FRAMES]
+        
+        # Warn if payload is large
+        if len(frames_base64) > 10:
+            print(f"[AI Route] WARNING: Large number of frames ({len(frames_base64)}). Processing with memory optimization.")
         
         # Get sensor data if provided (optional)
         sensor_data = data.get('sensorData')
@@ -108,9 +114,16 @@ def analyze_video():
         
         print(f"[AI Route] Received analyze-video request: {len(frames_base64)} frames")
         
-        # Convert base64 strings to image buffers
+        # Convert base64 strings to image buffers with memory optimization
+        # Resize large images to reduce memory usage
+        MAX_IMAGE_WIDTH = 1920  # Resize if wider than this
+        MAX_IMAGE_HEIGHT = 1080  # Resize if taller than this
+        MAX_FRAME_SIZE_MB = 2  # Warn if individual frame > 2MB
+        
         frames = []
         invalid_frames = []
+        import gc
+        
         for i, frame_str in enumerate(frames_base64):
             try:
                 # Remove data URL prefix if present
@@ -124,21 +137,62 @@ def analyze_video():
                 if not frame_bytes or len(frame_bytes) < 100:  # Minimum reasonable JPEG size
                     print(f"[AI Route] Frame {i + 1}: Invalid frame size ({len(frame_bytes) if frame_bytes else 0} bytes)")
                     invalid_frames.append(i + 1)
+                    del frame_bytes
                     continue
                 
                 # Validate JPEG header (should start with FF D8 FF)
                 if frame_bytes[:3] != b'\xff\xd8\xff':
                     print(f"[AI Route] Frame {i + 1}: Invalid JPEG header")
                     invalid_frames.append(i + 1)
+                    del frame_bytes
                     continue
                 
+                # Check frame size and resize if too large
+                frame_size_mb = len(frame_bytes) / (1024 * 1024)
+                if frame_size_mb > MAX_FRAME_SIZE_MB:
+                    print(f"[AI Route] Frame {i + 1}: Large frame ({frame_size_mb:.2f} MB), resizing to reduce memory usage")
+                    try:
+                        # Decode image for resizing
+                        image = Image.open(io.BytesIO(frame_bytes))
+                        width, height = image.size
+                        
+                        # Resize if larger than max dimensions
+                        if width > MAX_IMAGE_WIDTH or height > MAX_IMAGE_HEIGHT:
+                            # Calculate new dimensions maintaining aspect ratio
+                            ratio = min(MAX_IMAGE_WIDTH / width, MAX_IMAGE_HEIGHT / height)
+                            new_width = int(width * ratio)
+                            new_height = int(height * ratio)
+                            
+                            # Resize image
+                            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                            
+                            # Re-encode as JPEG
+                            output = io.BytesIO()
+                            image.save(output, format='JPEG', quality=85, optimize=True)
+                            frame_bytes = output.getvalue()
+                            print(f"[AI Route] Frame {i + 1}: Resized from {width}x{height} to {new_width}x{new_height}, new size: {len(frame_bytes) / (1024 * 1024):.2f} MB")
+                            
+                            del image
+                            del output
+                    except Exception as resize_error:
+                        print(f"[AI Route] Frame {i + 1}: Error resizing frame, using original: {str(resize_error)}")
+                        # Use original if resize fails
+                
                 frames.append(frame_bytes)
+                del frame_bytes  # Remove reference, frame is in list now
                 
                 if i < 3:
-                    print(f"[AI Route] Frame {i + 1}: base64 length={len(frame_str)}, buffer size={len(frame_bytes)} bytes")
+                    print(f"[AI Route] Frame {i + 1}: base64 length={len(frame_str)}, buffer size={len(frames[-1])} bytes")
+                
+                # Periodic garbage collection for large payloads
+                if i > 0 and i % 5 == 0:
+                    gc.collect()
+                    
             except Exception as e:
                 print(f"[AI Route] Error parsing frame {i + 1}: {str(e)}")
                 invalid_frames.append(i + 1)
+                if 'frame_bytes' in locals():
+                    del frame_bytes
                 continue
         
         if invalid_frames:
@@ -174,7 +228,11 @@ def analyze_video():
             analysis_duration = (time.time() - analysis_start_time) * 1000  # Convert to ms
             print(f"[AI Route] Analysis completed in {analysis_duration:.0f}ms")
             
-            # Clean up frames after processing
+            # Clean up frames after processing to free memory
+            # Explicitly delete frames and clear list
+            for frame in frames:
+                del frame
+            frames.clear()
             del frames
             gc.collect()
         except MemoryError as me:
