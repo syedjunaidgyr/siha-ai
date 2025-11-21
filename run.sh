@@ -1,6 +1,5 @@
-set -e
-
 #!/bin/bash
+set -e
 # Startup script for Python AI Service
 
 echo "Starting YourCare AI Service (Python)..."
@@ -65,5 +64,3 @@ else
         --error-logfile - \
         app:app
 fi
-
-tail -f /dev/null
