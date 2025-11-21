@@ -27,6 +27,10 @@ from services.preventive_health import PreventiveHealthInsightsService
 app = Flask(__name__)
 CORS(app)
 
+# Increase max content length to handle large video payloads (50MB)
+# This allows the 40MB+ payloads we're seeing
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
+
 # Initialize services
 face_detection_service = FaceDetectionService()
 vital_signs_service = VitalSignsAnalysisService()
@@ -76,6 +80,12 @@ def analyze_video():
     try:
         start_time = time.time()
         
+        # Log request size for debugging
+        content_length = request.content_length
+        if content_length:
+            content_length_mb = content_length / (1024 * 1024)
+            print(f"[AI Route] Request received: Content-Length={content_length_mb:.2f} MB")
+        
         # Get frames from request
         data = request.get_json()
         if not data:
@@ -84,6 +94,10 @@ def analyze_video():
         frames_base64 = data.get('frames', [])
         if not frames_base64 or not isinstance(frames_base64, list):
             return jsonify({'error': 'No frames provided'}), 400
+        
+        # Warn if too many frames (may cause memory issues)
+        if len(frames_base64) > 20:
+            print(f"[AI Route] WARNING: Large number of frames ({len(frames_base64)}). This may cause memory or timeout issues.")
         
         # Get sensor data if provided (optional)
         sensor_data = data.get('sensorData')
@@ -150,13 +164,33 @@ def analyze_video():
             'cached': False
         })
         
+    except MemoryError as me:
+        print(f"[AI Route] Memory error - payload too large: {str(me)}")
+        return jsonify({
+            'error': 'Payload too large',
+            'message': 'The video frames are too large to process. Please reduce the number of frames or image resolution.'
+        }), 413
     except Exception as e:
-        print(f"[AI Route] AI video analysis error: {str(e)}")
+        error_msg = str(e)
+        print(f"[AI Route] AI video analysis error: {error_msg}")
         import traceback
         traceback.print_exc()
+        
+        # Provide more helpful error messages
+        if 'timeout' in error_msg.lower() or 'timed out' in error_msg.lower():
+            return jsonify({
+                'error': 'Analysis timed out',
+                'message': 'The analysis took too long. Try reducing the number of frames.'
+            }), 504
+        elif 'memory' in error_msg.lower() or 'out of memory' in error_msg.lower():
+            return jsonify({
+                'error': 'Out of memory',
+                'message': 'The payload is too large. Please reduce the number of frames.'
+            }), 413
+        
         return jsonify({
             'error': 'Analysis failed',
-            'message': str(e)
+            'message': error_msg
         }), 500
 
 

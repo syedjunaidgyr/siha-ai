@@ -16,5 +16,9 @@ if ! python -c "import flask" 2>/dev/null; then
 fi
 
 # Run the service
+# For production with gunicorn (better for large payloads):
+# gunicorn -w 2 -b 0.0.0.0:3001 --timeout 300 --max-requests 1000 --max-requests-jitter 100 app:app
+
+# For development:
 python app.py
 
