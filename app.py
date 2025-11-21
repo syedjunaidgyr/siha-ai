@@ -1,0 +1,263 @@
+"""
+YourCare AI Analysis Service - Python Implementation
+Flask-based microservice for vital signs detection from face analysis
+"""
+import os
+import base64
+import io
+import time
+import hashlib
+from datetime import datetime
+from typing import List, Dict, Optional
+import warnings
+
+# Suppress OpenCV warnings about JPEG SOS parameters (harmless)
+os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
+
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from PIL import Image
+import numpy as np
+
+from services.face_detection import FaceDetectionService
+from services.vital_signs import VitalSignsAnalysisService
+from services.cache import CacheService
+from services.preventive_health import PreventiveHealthInsightsService
+
+app = Flask(__name__)
+CORS(app)
+
+# Initialize services
+face_detection_service = FaceDetectionService()
+vital_signs_service = VitalSignsAnalysisService()
+cache_service = CacheService()
+preventive_health_service = PreventiveHealthInsightsService()
+
+# Set face detection service reference in vital signs service
+vital_signs_service.set_face_detection_service(face_detection_service)
+
+# Service initialization flag
+services_initialized = False
+
+
+def initialize_services():
+    """Initialize AI services on startup"""
+    global services_initialized
+    if not services_initialized:
+        print("Initializing AI services...")
+        face_detection_service.initialize()
+        cache_service.initialize()
+        preventive_health_service.initialize()
+        services_initialized = True
+        print("AI services initialized successfully")
+
+
+@app.before_request
+def before_request():
+    """Initialize services before first request"""
+    if not services_initialized:
+        initialize_services()
+
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'ok',
+        'service': 'ai-analysis-python',
+        'modelsLoaded': services_initialized,
+        'timestamp': datetime.utcnow().isoformat()
+    })
+
+
+@app.route('/api/ai/analyze-video', methods=['POST'])
+def analyze_video():
+    """Analyze multiple frames (video sequence) for vital signs"""
+    try:
+        start_time = time.time()
+        
+        # Get frames from request
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        frames_base64 = data.get('frames', [])
+        if not frames_base64 or not isinstance(frames_base64, list):
+            return jsonify({'error': 'No frames provided'}), 400
+        
+        # Get sensor data if provided (optional)
+        sensor_data = data.get('sensorData')
+        if sensor_data:
+            print(f"[AI Route] Received sensor data: motion={sensor_data.get('accelerometer') is not None}, "
+                  f"proximity={sensor_data.get('proximity') is not None}, "
+                  f"light={sensor_data.get('ambientLight') is not None}")
+        
+        print(f"[AI Route] Received analyze-video request: {len(frames_base64)} frames")
+        
+        # Convert base64 strings to image buffers
+        frames = []
+        for i, frame_str in enumerate(frames_base64):
+            try:
+                # Remove data URL prefix if present
+                if ',' in frame_str:
+                    frame_str = frame_str.split(',', 1)[1]
+                
+                # Decode base64
+                frame_bytes = base64.b64decode(frame_str)
+                frames.append(frame_bytes)
+                
+                if i < 3:
+                    print(f"[AI Route] Frame {i + 1}: base64 length={len(frame_str)}, buffer size={len(frame_bytes)} bytes")
+            except Exception as e:
+                print(f"[AI Route] Error parsing frame {i + 1}: {str(e)}")
+                return jsonify({'error': f'Invalid frame {i + 1}: {str(e)}'}), 400
+        
+        if not frames:
+            return jsonify({'error': 'No valid frames found'}), 400
+        
+        print(f"[AI Route] Processing {len(frames)} frames, first frame size: {len(frames[0])} bytes")
+        
+        # Check cache
+        cache_key = cache_service.generate_key(frames[0])
+        cached = cache_service.get(cache_key)
+        if cached:
+            print("[AI Route] Returning cached result")
+            return jsonify({
+                'success': True,
+                'result': cached,
+                'cached': True
+            })
+        
+        print("[AI Route] Cache miss, starting analysis...")
+        analysis_start_time = time.time()
+        
+        # Analyze the frames (with optional sensor data for quality adjustment)
+        result = vital_signs_service.analyze_video_frames(frames, sensor_data=sensor_data)
+        
+        analysis_duration = (time.time() - analysis_start_time) * 1000  # Convert to ms
+        print(f"[AI Route] Analysis completed in {analysis_duration:.0f}ms")
+        
+        # Cache result (5 minutes TTL)
+        cache_service.set(cache_key, result, 300)
+        print("[AI Route] Result cached")
+        
+        print(f"[AI Route] Sending response: faceDetected={result['faceDetected']}, "
+              f"totalFrames={result.get('totalFrames', 0)}, hasVitals={bool(result.get('vitals', {}).get('heartRate'))}")
+        
+        return jsonify({
+            'success': True,
+            'result': result,
+            'cached': False
+        })
+        
+    except Exception as e:
+        print(f"[AI Route] AI video analysis error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'error': 'Analysis failed',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/api/ai/analyze-image', methods=['POST'])
+def analyze_image():
+    """Analyze a single image frame for vital signs"""
+    try:
+        # Check if file was uploaded
+        if 'image' in request.files:
+            file = request.files['image']
+            image_bytes = file.read()
+        else:
+            # Try to get from JSON
+            data = request.get_json()
+            if not data or 'image' not in data:
+                return jsonify({'error': 'No image provided'}), 400
+            
+            image_str = data['image']
+            if ',' in image_str:
+                image_str = image_str.split(',', 1)[1]
+            image_bytes = base64.b64decode(image_str)
+        
+        # Check cache
+        cache_key = cache_service.generate_key(image_bytes)
+        cached = cache_service.get(cache_key)
+        if cached:
+            return jsonify({
+                'success': True,
+                'result': cached,
+                'cached': True
+            })
+        
+        # Analyze the image
+        result = vital_signs_service.analyze_image_frame(image_bytes)
+        
+        # Cache result (5 minutes TTL)
+        cache_service.set(cache_key, result, 300)
+        
+        return jsonify({
+            'success': True,
+            'result': result,
+            'cached': False
+        })
+        
+    except Exception as e:
+        print(f"AI analysis error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'error': 'Analysis failed',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/api/ai/preventive-health', methods=['POST'])
+def preventive_health():
+    """Generate preventive health & lifestyle insights from stored metrics"""
+    try:
+        payload = request.get_json()
+        if not payload:
+            return jsonify({'error': 'Request body is required'}), 400
+
+        metrics = payload.get('metrics')
+        if not metrics or not isinstance(metrics, list):
+            return jsonify({'error': 'metrics must be a non-empty list'}), 400
+
+        user_profile = payload.get('userProfile')
+        try:
+            lookback_days = int(payload.get('lookbackDays', 14))
+        except (TypeError, ValueError):
+            lookback_days = 14
+
+        result = preventive_health_service.generate_insights(
+            metrics=metrics,
+            user_profile=user_profile,
+            lookback_days=lookback_days
+        )
+
+        return jsonify({
+            'success': True,
+            'result': result
+        })
+    except ValueError as ve:
+        return jsonify({'error': str(ve)}), 400
+    except Exception as e:
+        print(f"[AI Route] Preventive health error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'error': 'Preventive insight generation failed',
+            'message': str(e)
+        }), 500
+
+
+if __name__ == '__main__':
+    # Initialize services
+    initialize_services()
+    
+    # Get port from environment or default to 3001
+    port = int(os.environ.get('PORT', 3001))
+    
+    print(f"Starting YourCare AI Service (Python) on port {port}...")
+    app.run(host='0.0.0.0', port=port, debug=True)
+

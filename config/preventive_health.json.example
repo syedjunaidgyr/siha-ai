@@ -1,0 +1,127 @@
+{
+  "news2": {
+    "respiratory_rate": {
+      "very_low": 8,
+      "low": 11,
+      "normal_high": 20,
+      "high": 24
+    },
+    "oxygen_saturation": {
+      "critical": 91,
+      "low": 93,
+      "moderate": 95
+    },
+    "systolic": {
+      "very_low": 90,
+      "low": 100,
+      "moderate": 110,
+      "normal_high": 219
+    },
+    "heart_rate": {
+      "very_low": 40,
+      "low": 50,
+      "normal_high": 90,
+      "high": 110,
+      "very_high": 130
+    },
+    "temperature": {
+      "hypothermic": 35,
+      "low": 36,
+      "normal_high": 38,
+      "fever": 39
+    },
+    "score_levels": {
+      "critical": 7,
+      "high": 5,
+      "moderate": 3
+    }
+  },
+  "blood_pressure": {
+    "crisis_systolic": 180,
+    "crisis_diastolic": 120,
+    "stage2_systolic": 140,
+    "stage2_diastolic": 90,
+    "stage1_systolic": 130,
+    "stage1_diastolic": 80,
+    "elevated_systolic": 120
+  },
+  "stress": {
+    "very_high": 80,
+    "elevated": 60,
+    "moderate": 40
+  },
+  "fever": {
+    "temperature_threshold": 37.5,
+    "temperature_elevated": 37.4,
+    "heart_rate_threshold": 88,
+    "stress_threshold": 70,
+    "spo2_threshold": 97,
+    "probability_threshold": 0.6,
+    "weights": {
+      "temperature": 1.2,
+      "heart_rate": 0.9,
+      "stress": 0.7,
+      "spo2": 0.8
+    },
+    "trend_bonus": {
+      "heart_rate": 0.15,
+      "temperature": 0.2
+    },
+    "sigmoid_offset": 1.0
+  },
+  "respiratory": {
+    "rate_high": 20,
+    "rate_very_high": 22,
+    "spo2_threshold": 96,
+    "spo2_low": 94,
+    "heart_rate_threshold": 85,
+    "stress_threshold": 65,
+    "probability_threshold": 0.6,
+    "weights": {
+      "respiratory_rate": 1.0,
+      "spo2": 0.9,
+      "heart_rate": 0.4,
+      "stress": 0.4
+    },
+    "trend_bonus": {
+      "respiratory_rate": 0.2,
+      "oxygen_saturation": 0.25
+    },
+    "sigmoid_offset": 0.9
+  },
+  "stress_recovery": {
+    "optimal_heart_rate": 70,
+    "optimal_respiratory_rate": 16,
+    "weights": {
+      "stress": 0.4,
+      "heart_rate": 0.35,
+      "respiratory_rate": 0.25
+    },
+    "trend_bonus": 0.1,
+    "low_threshold": 0.4,
+    "medium_threshold": 0.5
+  },
+  "lifestyle": {
+    "hydration_base_ml": 2300,
+    "hydration_ml_per_kg": 35,
+    "sleep_target_hours": 7.5,
+    "sleep_young_adult_hours": 8.0,
+    "young_adult_age": 25
+  },
+  "probability": {
+    "fever_high": 0.65,
+    "respiratory_high": 0.65,
+    "fever_warning": 0.55,
+    "respiratory_warning": 0.55,
+    "fever_alert": 0.7,
+    "respiratory_alert": 0.7
+  },
+  "confidence": {
+    "fever_base": 0.6,
+    "fever_news2_factor": 20,
+    "respiratory_base": 0.55,
+    "respiratory_news2_factor": 25
+  },
+  "default_lookback_days": 14
+}
+
