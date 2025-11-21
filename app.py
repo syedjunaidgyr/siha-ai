@@ -145,11 +145,31 @@ def analyze_video():
         print("[AI Route] Cache miss, starting analysis...")
         analysis_start_time = time.time()
         
-        # Analyze the frames (with optional sensor data for quality adjustment)
-        result = vital_signs_service.analyze_video_frames(frames, sensor_data=sensor_data)
-        
-        analysis_duration = (time.time() - analysis_start_time) * 1000  # Convert to ms
-        print(f"[AI Route] Analysis completed in {analysis_duration:.0f}ms")
+        try:
+            # Analyze the frames (with optional sensor data for quality adjustment)
+            result = vital_signs_service.analyze_video_frames(frames, sensor_data=sensor_data)
+            
+            analysis_duration = (time.time() - analysis_start_time) * 1000  # Convert to ms
+            print(f"[AI Route] Analysis completed in {analysis_duration:.0f}ms")
+        except MemoryError as me:
+            print(f"[AI Route] Memory error during analysis: {str(me)}")
+            # Clean up frames to free memory
+            del frames
+            import gc
+            gc.collect()
+            return jsonify({
+                'error': 'Out of memory',
+                'message': 'The video frames are too large to process. Please reduce the number of frames or image resolution.'
+            }), 413
+        except Exception as analysis_error:
+            print(f"[AI Route] Error during video analysis: {str(analysis_error)}")
+            import traceback
+            traceback.print_exc()
+            # Clean up frames to free memory
+            del frames
+            import gc
+            gc.collect()
+            raise  # Re-raise to be caught by outer exception handler
         
         # Cache result (5 minutes TTL)
         cache_service.set(cache_key, result, 300)
@@ -292,6 +312,15 @@ if __name__ == '__main__':
     # Get port from environment or default to 3001
     port = int(os.environ.get('PORT', 3001))
     
-    print(f"Starting YourCare AI Service (Python) on port {port}...")
-    app.run(host='0.0.0.0', port=port, debug=True)
+    # Check if running in production (use gunicorn) or development
+    is_production = os.environ.get('FLASK_ENV') == 'production' or os.environ.get('ENV') == 'production'
+    
+    if is_production:
+        print(f"Starting YourCare AI Service (Python) in PRODUCTION mode on port {port}...")
+        print("NOTE: Use gunicorn for production: gunicorn -w 2 -b 0.0.0.0:3001 --timeout 300 app:app")
+        # In production, don't use debug mode
+        app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+    else:
+        print(f"Starting YourCare AI Service (Python) in DEVELOPMENT mode on port {port}...")
+        app.run(host='0.0.0.0', port=port, debug=True)
 
