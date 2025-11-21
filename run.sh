@@ -1,3 +1,5 @@
+set -e
+
 #!/bin/bash
 # Startup script for Python AI Service
 
@@ -64,3 +66,4 @@ else
         app:app
 fi
 
+tail -f /dev/null

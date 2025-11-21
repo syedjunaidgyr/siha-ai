@@ -11,7 +11,7 @@ module.exports = {
     // Reduced memory threshold to restart before OOM kill
     // System OOM killer typically triggers around 80-90% of available memory
     // Setting to 1.5G gives buffer before system kills the process
-    max_memory_restart: '1.5G',
+    max_memory_restart: '1500M',
     // Restart after processing a certain number of requests to prevent memory leaks
     // This works in conjunction with gunicorn's --max-requests
     min_uptime: '10s', // Minimum uptime before considering it a successful start
