@@ -49,11 +49,19 @@ chmod +x run.sh
 
 ## Memory Management
 
-The service is configured with:
+The service is configured with aggressive memory management to prevent OOM kills:
 - **1 worker process** (reduces memory usage)
-- **Auto-restart after 30 requests** (prevents memory leaks - reduced from 50)
-- **2GB memory limit** (PM2 will restart if exceeded - increased for large payloads and ML models)
+- **Auto-restart after 20 requests** (prevents memory leaks - more frequent restarts)
+- **1.5GB memory limit** (PM2 will restart if exceeded - reduced to prevent OOM kills before system limit)
 - **5-minute timeout** for large video processing
+- **30-second graceful timeout** for clean worker shutdown
+- **4-second restart delay** to allow memory to be freed
+
+**Important:** If you're still experiencing OOM kills, consider:
+1. Reducing `max_memory_restart` in `ecosystem.config.js` to `1G` or `1.2G`
+2. Reducing `--max-requests` in `run.sh` to `15` or `10`
+3. Checking system memory: `free -h` and `cat /proc/meminfo`
+4. Monitoring memory usage: `pm2 monit`
 
 ## Troubleshooting
 
@@ -82,11 +90,14 @@ git pull
 pm2 restart siha-ai-sh
 ```
 
-### If service keeps crashing:
-1. Check memory: `free -h`
-2. Check logs: `pm2 logs siha-ai-sh --err`
-3. Reduce worker count in `run.sh` (already set to 1)
-4. Reduce `--max-requests` in `run.sh` (currently 30)
+### If service keeps crashing (OOM kills):
+1. Check system memory: `free -h` and `cat /proc/meminfo`
+2. Check PM2 memory usage: `pm2 monit` (watch the memory column)
+3. Check logs: `pm2 logs siha-ai-sh --err`
+4. Check system logs for OOM kills: `dmesg | grep -i "out of memory"` or `journalctl -k | grep -i oom`
+5. Reduce `max_memory_restart` in `ecosystem.config.js` (currently 1.5G, try 1G)
+6. Reduce `--max-requests` in `run.sh` (currently 20, try 15 or 10)
+7. Check if other processes are using too much memory: `ps aux --sort=-%mem | head -20`
 
 ## Health Check
 
