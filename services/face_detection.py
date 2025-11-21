@@ -26,6 +26,42 @@ except (AttributeError, Exception):
     pass
 
 
+def decode_image_bytes(image_bytes: bytes) -> Optional[np.ndarray]:
+    """
+    Decode image bytes to numpy array with fallback support.
+    Tries OpenCV first, falls back to PIL if OpenCV fails.
+    
+    Args:
+        image_bytes: Raw image bytes (JPEG, PNG, etc.)
+        
+    Returns:
+        numpy array (BGR format) or None if decoding fails
+    """
+    # First try OpenCV (faster and handles most cases)
+    try:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if image is not None:
+            return image
+    except Exception as e:
+        print(f"[ImageDecode] OpenCV decode failed: {str(e)}")
+    
+    # Fallback to PIL if OpenCV fails (handles problematic JPEGs better)
+    try:
+        pil_image = Image.open(io.BytesIO(image_bytes))
+        # Convert PIL RGB to OpenCV BGR
+        rgb_array = np.array(pil_image)
+        if len(rgb_array.shape) == 2:  # Grayscale
+            bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_GRAY2BGR)
+        else:  # RGB
+            bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+        print("[ImageDecode] Successfully decoded using PIL fallback")
+        return bgr_array
+    except Exception as e:
+        print(f"[ImageDecode] PIL decode also failed: {str(e)}")
+        return None
+
+
 class FaceDetectionService:
     """Face detection using MediaPipe Face Detection"""
     
@@ -64,9 +100,8 @@ class FaceDetectionService:
         start_time = time.time()
         
         try:
-            # Convert bytes to numpy array
-            nparr = np.frombuffer(image_bytes, np.uint8)
-            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            # Decode image bytes (with fallback support)
+            image = decode_image_bytes(image_bytes)
             
             if image is None:
                 print("[FaceDetection] Failed to decode image")
@@ -128,9 +163,8 @@ class FaceDetectionService:
         Improved with skin tone analysis
         """
         try:
-            # Convert bytes to numpy array
-            nparr = np.frombuffer(image_bytes, np.uint8)
-            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            # Decode image bytes (with fallback support)
+            image = decode_image_bytes(image_bytes)
             
             if image is None:
                 return {
@@ -204,9 +238,8 @@ class FaceDetectionService:
         Uses forehead region where blood vessels are most visible
         """
         try:
-            # Convert bytes to numpy array
-            nparr = np.frombuffer(image_bytes, np.uint8)
-            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            # Decode image bytes (with fallback support)
+            image = decode_image_bytes(image_bytes)
             
             if image is None:
                 raise ValueError("Failed to decode image")
@@ -250,9 +283,8 @@ class FaceDetectionService:
         score = 100
         
         try:
-            # Convert bytes to numpy array
-            nparr = np.frombuffer(image_bytes, np.uint8)
-            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            # Decode image bytes (with fallback support)
+            image = decode_image_bytes(image_bytes)
             
             if image is None:
                 return {

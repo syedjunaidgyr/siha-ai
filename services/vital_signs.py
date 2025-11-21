@@ -11,6 +11,44 @@ from scipy.ndimage import median_filter, gaussian_filter1d
 from scipy.fft import fft, fftfreq
 from scipy.interpolate import interp1d
 import time
+from PIL import Image
+import io
+
+
+def decode_image_bytes(image_bytes: bytes) -> Optional[np.ndarray]:
+    """
+    Decode image bytes to numpy array with fallback support.
+    Tries OpenCV first, falls back to PIL if OpenCV fails.
+    
+    Args:
+        image_bytes: Raw image bytes (JPEG, PNG, etc.)
+        
+    Returns:
+        numpy array (BGR format) or None if decoding fails
+    """
+    # First try OpenCV (faster and handles most cases)
+    try:
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if image is not None:
+            return image
+    except Exception as e:
+        print(f"[ImageDecode] OpenCV decode failed: {str(e)}")
+    
+    # Fallback to PIL if OpenCV fails (handles problematic JPEGs better)
+    try:
+        pil_image = Image.open(io.BytesIO(image_bytes))
+        # Convert PIL RGB to OpenCV BGR
+        rgb_array = np.array(pil_image)
+        if len(rgb_array.shape) == 2:  # Grayscale
+            bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_GRAY2BGR)
+        else:  # RGB
+            bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+        print("[ImageDecode] Successfully decoded using PIL fallback")
+        return bgr_array
+    except Exception as e:
+        print(f"[ImageDecode] PIL decode also failed: {str(e)}")
+        return None
 
 
 class VitalSignsAnalysisService:
@@ -332,9 +370,8 @@ class VitalSignsAnalysisService:
         Extract vital signs from ROI using PPG and color analysis
         """
         try:
-            # Convert bytes to numpy array
-            nparr = np.frombuffer(roi_bytes, np.uint8)
-            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            # Decode image bytes (with fallback support)
+            image = decode_image_bytes(roi_bytes)
             
             if image is None:
                 return self._default_vitals()
@@ -734,8 +771,7 @@ class VitalSignsAnalysisService:
         stress_levels = []
         for roi_bytes in rois:
             try:
-                nparr = np.frombuffer(roi_bytes, np.uint8)
-                image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                image = decode_image_bytes(roi_bytes)
                 if image is not None:
                     stress = self._calculate_stress_level(image)
                     stress_levels.append(stress)
@@ -749,8 +785,7 @@ class VitalSignsAnalysisService:
         spo2_levels = []
         for roi_bytes in rois:
             try:
-                nparr = np.frombuffer(roi_bytes, np.uint8)
-                image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                image = decode_image_bytes(roi_bytes)
                 if image is not None:
                     spo2 = self._calculate_oxygen_saturation(image)
                     spo2_levels.append(spo2)
@@ -811,8 +846,7 @@ class VitalSignsAnalysisService:
         
         for roi_bytes in rois:
             try:
-                nparr = np.frombuffer(roi_bytes, np.uint8)
-                image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                image = decode_image_bytes(roi_bytes)
                 if image is None:
                     continue
                 
@@ -1241,8 +1275,7 @@ class VitalSignsAnalysisService:
         temps = []
         for roi_bytes in rois:
             try:
-                nparr = np.frombuffer(roi_bytes, np.uint8)
-                image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                image = decode_image_bytes(roi_bytes)
                 if image is not None:
                     temps.append(self._estimate_temperature(image, sensor_data))
             except Exception:

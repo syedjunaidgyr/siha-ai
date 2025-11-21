@@ -110,6 +110,7 @@ def analyze_video():
         
         # Convert base64 strings to image buffers
         frames = []
+        invalid_frames = []
         for i, frame_str in enumerate(frames_base64):
             try:
                 # Remove data URL prefix if present
@@ -118,16 +119,33 @@ def analyze_video():
                 
                 # Decode base64
                 frame_bytes = base64.b64decode(frame_str)
+                
+                # Validate that we got valid bytes
+                if not frame_bytes or len(frame_bytes) < 100:  # Minimum reasonable JPEG size
+                    print(f"[AI Route] Frame {i + 1}: Invalid frame size ({len(frame_bytes) if frame_bytes else 0} bytes)")
+                    invalid_frames.append(i + 1)
+                    continue
+                
+                # Validate JPEG header (should start with FF D8 FF)
+                if frame_bytes[:3] != b'\xff\xd8\xff':
+                    print(f"[AI Route] Frame {i + 1}: Invalid JPEG header")
+                    invalid_frames.append(i + 1)
+                    continue
+                
                 frames.append(frame_bytes)
                 
                 if i < 3:
                     print(f"[AI Route] Frame {i + 1}: base64 length={len(frame_str)}, buffer size={len(frame_bytes)} bytes")
             except Exception as e:
                 print(f"[AI Route] Error parsing frame {i + 1}: {str(e)}")
-                return jsonify({'error': f'Invalid frame {i + 1}: {str(e)}'}), 400
+                invalid_frames.append(i + 1)
+                continue
         
-        if not frames:
-            return jsonify({'error': 'No valid frames found'}), 400
+        if invalid_frames:
+            print(f"[AI Route] WARNING: {len(invalid_frames)} invalid frames skipped: {invalid_frames}")
+        
+        if len(frames) == 0:
+            return jsonify({'error': 'No valid frames found after decoding'}), 400
         
         print(f"[AI Route] Processing {len(frames)} frames, first frame size: {len(frames[0])} bytes")
         
@@ -322,5 +340,5 @@ if __name__ == '__main__':
         app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
     else:
         print(f"Starting YourCare AI Service (Python) in DEVELOPMENT mode on port {port}...")
-        app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=True)
 
