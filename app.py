@@ -163,17 +163,24 @@ def analyze_video():
         print("[AI Route] Cache miss, starting analysis...")
         analysis_start_time = time.time()
         
+        # Force garbage collection before processing to free up memory
+        import gc
+        gc.collect()
+        
         try:
             # Analyze the frames (with optional sensor data for quality adjustment)
             result = vital_signs_service.analyze_video_frames(frames, sensor_data=sensor_data)
             
             analysis_duration = (time.time() - analysis_start_time) * 1000  # Convert to ms
             print(f"[AI Route] Analysis completed in {analysis_duration:.0f}ms")
+            
+            # Clean up frames after processing
+            del frames
+            gc.collect()
         except MemoryError as me:
             print(f"[AI Route] Memory error during analysis: {str(me)}")
             # Clean up frames to free memory
             del frames
-            import gc
             gc.collect()
             return jsonify({
                 'error': 'Out of memory',
@@ -185,7 +192,6 @@ def analyze_video():
             traceback.print_exc()
             # Clean up frames to free memory
             del frames
-            import gc
             gc.collect()
             raise  # Re-raise to be caught by outer exception handler
         

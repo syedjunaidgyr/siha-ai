@@ -19,19 +19,24 @@ fi
 if command -v gunicorn &> /dev/null; then
     echo "Starting with gunicorn (production mode)..."
     # Production settings for large payloads:
-    # -w 2: 2 worker processes (adjust based on CPU cores)
+    # -w 1: 1 worker process (reduces memory usage, prevents OOM kills)
     # --timeout 300: 5 minute timeout for large video processing
-    # --max-requests 1000: Restart workers after 1000 requests to prevent memory leaks
-    # --max-requests-jitter 100: Randomize restart to avoid all workers restarting at once
+    # --max-requests 50: Restart workers more frequently to prevent memory leaks
+    # --max-requests-jitter 10: Randomize restart to avoid all workers restarting at once
     # --worker-class sync: Use sync workers (better for CPU-intensive tasks)
     # --worker-connections 1000: Max connections per worker
-    gunicorn -w 2 \
+    # --limit-request-line 8190: Increase max request line size
+    # --limit-request-fields 32768: Increase max request fields
+    # --preload: Preload app to share memory between workers (not used with -w 1, but good practice)
+    gunicorn -w 1 \
         -b 0.0.0.0:3001 \
         --timeout 300 \
-        --max-requests 1000 \
-        --max-requests-jitter 100 \
+        --max-requests 50 \
+        --max-requests-jitter 10 \
         --worker-class sync \
         --worker-connections 1000 \
+        --limit-request-line 8190 \
+        --limit-request-fields 32768 \
         --log-level info \
         app:app
 else
@@ -39,12 +44,14 @@ else
     pip install gunicorn
     
     echo "Starting with gunicorn..."
-    gunicorn -w 2 \
+    gunicorn -w 1 \
         -b 0.0.0.0:3001 \
         --timeout 300 \
-        --max-requests 1000 \
-        --max-requests-jitter 100 \
+        --max-requests 50 \
+        --max-requests-jitter 10 \
         --worker-class sync \
+        --limit-request-line 8190 \
+        --limit-request-fields 32768 \
         app:app
 fi
 

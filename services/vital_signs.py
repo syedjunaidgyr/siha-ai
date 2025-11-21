@@ -19,6 +19,7 @@ def decode_image_bytes(image_bytes: bytes) -> Optional[np.ndarray]:
     """
     Decode image bytes to numpy array with fallback support.
     Tries OpenCV first, falls back to PIL if OpenCV fails.
+    For large images (>1MB), uses PIL directly to avoid memory issues.
     
     Args:
         image_bytes: Raw image bytes (JPEG, PNG, etc.)
@@ -26,28 +27,52 @@ def decode_image_bytes(image_bytes: bytes) -> Optional[np.ndarray]:
     Returns:
         numpy array (BGR format) or None if decoding fails
     """
-    # First try OpenCV (faster and handles most cases)
-    try:
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if image is not None:
-            return image
-    except Exception as e:
-        print(f"[ImageDecode] OpenCV decode failed: {str(e)}")
+    import sys
+    import contextlib
+    
+    # For large images, use PIL directly to avoid OpenCV memory issues
+    if len(image_bytes) > 1024 * 1024:  # > 1MB
+        try:
+            pil_image = Image.open(io.BytesIO(image_bytes))
+            pil_image.load()
+            rgb_array = np.array(pil_image)
+            if len(rgb_array.shape) == 2:  # Grayscale
+                bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_GRAY2BGR)
+            else:  # RGB
+                bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+            return bgr_array
+        except Exception as e:
+            print(f"[ImageDecode] PIL decode failed for large image: {str(e)}")
+            return None
+    
+    # Suppress stderr to prevent OpenCV from printing "Invalid SOS parameters" error
+    # This error is harmless and we'll use PIL fallback anyway
+    with contextlib.redirect_stderr(io.StringIO()):
+        # First try OpenCV (faster and handles most cases)
+        try:
+            nparr = np.frombuffer(image_bytes, np.uint8)
+            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if image is not None:
+                return image
+        except Exception:
+            # Silently catch - we'll try PIL
+            pass
     
     # Fallback to PIL if OpenCV fails (handles problematic JPEGs better)
+    # PIL is more tolerant of JPEG encoding issues
     try:
         pil_image = Image.open(io.BytesIO(image_bytes))
+        # Ensure image is loaded (lazy loading)
+        pil_image.load()
         # Convert PIL RGB to OpenCV BGR
         rgb_array = np.array(pil_image)
         if len(rgb_array.shape) == 2:  # Grayscale
             bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_GRAY2BGR)
         else:  # RGB
             bgr_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
-        print("[ImageDecode] Successfully decoded using PIL fallback")
         return bgr_array
     except Exception as e:
-        print(f"[ImageDecode] PIL decode also failed: {str(e)}")
+        print(f"[ImageDecode] PIL decode failed: {str(e)}")
         return None
 
 
@@ -72,6 +97,8 @@ class VitalSignsAnalysisService:
         Returns:
             Dict with analysis results
         """
+        import gc
+        
         start_time = time.time()
         print(f"[VitalSigns] Starting video frame analysis: {len(frames)} frames")
         
@@ -111,10 +138,17 @@ class VitalSignsAnalysisService:
                 except Exception as e:
                     print(f"[VitalSigns] ROI extraction failed for frame {i+1}: {str(e)}")
                     continue
+                
+                # Periodic garbage collection every 5 frames to manage memory
+                if (i + 1) % 5 == 0:
+                    gc.collect()
                     
             except Exception as e:
                 print(f"[VitalSigns] Error processing frame {i+1}: {str(e)}")
                 continue
+        
+        # Final garbage collection after processing all frames
+        gc.collect()
         
         if len(rois) < 10:  # Need at least 10 frames for temporal analysis
             print(f"[VitalSigns] Not enough valid frames ({len(rois)}), using fallback")
