@@ -52,7 +52,7 @@ chmod +x run.sh
 The service is configured with:
 - **1 worker process** (reduces memory usage)
 - **Auto-restart after 50 requests** (prevents memory leaks)
-- **1GB memory limit** (PM2 will restart if exceeded)
+- **1.5GB memory limit** (PM2 will restart if exceeded - increased for large payloads)
 - **5-minute timeout** for large video processing
 
 ## Troubleshooting

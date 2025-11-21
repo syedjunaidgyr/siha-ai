@@ -8,7 +8,7 @@ module.exports = {
     exec_mode: 'fork',
     autorestart: true,
     watch: false,
-    max_memory_restart: '1G', // Restart if memory exceeds 1GB
+    max_memory_restart: '1.5G', // Restart if memory exceeds 1.5GB (increased for large payloads)
     env: {
       NODE_ENV: 'production',
       PORT: 3001,
