@@ -1,5 +1,7 @@
 # AI Service Deployment Guide
 
+> **For AWS EC2 deployment, see [EC2_DEPLOYMENT.md](./EC2_DEPLOYMENT.md) for EC2-specific configurations.**
+
 ## Quick Restart
 
 After deploying code changes, restart the service:
@@ -9,14 +11,14 @@ After deploying code changes, restart the service:
 cd /srv/siha/ai-service-python  # or your actual path
 
 # Restart with PM2
-pm2 restart siha-ai-sh
+pm2 restart siha-ai
 
 # Or if using ecosystem config
 pm2 restart ecosystem.config.js
 
 # Check status
 pm2 status
-pm2 logs siha-ai-sh --lines 50
+pm2 logs siha-ai --lines 50
 ```
 
 ## Using PM2 Ecosystem Config
@@ -68,7 +70,7 @@ The service is configured with aggressive memory management to prevent OOM kills
 ### Check if service is running:
 ```bash
 pm2 status
-pm2 logs siha-ai-sh
+pm2 logs siha-ai
 ```
 
 ### Check memory usage:
@@ -78,7 +80,7 @@ pm2 monit
 
 ### View error logs:
 ```bash
-tail -f ~/.pm2/logs/siha-ai-sh-error.log
+tail -f ~/.pm2/logs/siha-ai-error.log
 ```
 
 ### Restart after code changes:
@@ -87,13 +89,13 @@ tail -f ~/.pm2/logs/siha-ai-sh-error.log
 git pull
 
 # Restart service
-pm2 restart siha-ai-sh
+pm2 restart siha-ai
 ```
 
 ### If service keeps crashing (OOM kills):
 1. Check system memory: `free -h` and `cat /proc/meminfo`
 2. Check PM2 memory usage: `pm2 monit` (watch the memory column)
-3. Check logs: `pm2 logs siha-ai-sh --err`
+3. Check logs: `pm2 logs siha-ai --err`
 4. Check system logs for OOM kills: `dmesg | grep -i "out of memory"` or `journalctl -k | grep -i oom`
 5. Reduce `max_memory_restart` in `ecosystem.config.js` (currently 1.5G, try 1G)
 6. Reduce `--max-requests` in `run.sh` (currently 20, try 15 or 10)

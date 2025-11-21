@@ -8,17 +8,22 @@ module.exports = {
     exec_mode: 'fork',
     autorestart: true,
     watch: false,
-    max_memory_restart: '1500M',
+    // For t2.micro (1GB RAM): Use 400MB limit to leave room for OS and other processes
+    // For larger instances, increase to 1G or 1.5G
+    max_memory_restart: '400M',
     min_uptime: '10s',
-    max_restarts: 10,
-    restart_delay: 4000,
+    max_restarts: 15, // More restarts allowed for memory-constrained environments
+    restart_delay: 5000, // Longer delay to ensure memory is freed
     kill_timeout: 5000,
     env: {
       NODE_ENV: 'production',
       FLASK_ENV: 'production',
       PORT: 3001,
       PYTHONHASHSEED: '0',
-      MALLOC_ARENA_MAX: '2'
+      MALLOC_ARENA_MAX: '2', // Limit memory arenas to reduce fragmentation
+      PYTHONUNBUFFERED: '1', // Disable buffering for better memory usage
+      // Limit Python memory growth (if using memory_profiler or similar)
+      MALLOC_TRIM_THRESHOLD_: '131072' // 128KB - more aggressive memory trimming
     },
     error_file: '/home/ec2-user/.pm2/logs/siha-ai-error.log',
     out_file: '/home/ec2-user/.pm2/logs/siha-ai-out.log',

@@ -19,29 +19,29 @@ fi
 # Check if gunicorn is available
 if command -v gunicorn &> /dev/null; then
     echo "Starting with gunicorn (production mode)..."
-    # Production settings for large payloads with memory optimization:
+    # Production settings optimized for t2.micro (1GB RAM) with aggressive memory management:
     # -w 1: 1 worker process (reduces memory usage, prevents OOM kills)
     # --timeout 300: 5 minute timeout for large video processing
-    # --max-requests 20: Restart workers more frequently to prevent memory leaks (reduced from 30)
-    # --max-requests-jitter 3: Randomize restart to avoid all workers restarting at once
-    # --worker-class sync: Use sync workers (better for CPU-intensive tasks)
-    # --worker-connections 1000: Max connections per worker
+    # --max-requests 5: Very frequent restarts to prevent memory leaks (critical for 1GB RAM)
+    # --max-requests-jitter 2: Randomize restart to avoid all workers restarting at once
+    # --worker-class sync: Use sync workers (better for CPU-intensive tasks, lower memory)
+    # --worker-connections 100: Reduced connections for memory-constrained environments
     # --limit-request-line 8190: Increase max request line size
     # --limit-request-fields 32768: Increase max request fields
     # --graceful-timeout 30: Time to wait for workers to finish before killing
-    # --preload: Preload app to share memory between workers (not used with -w 1, but good practice)
-    # Note: Memory limits should be set via PM2 max_memory_restart
+    # Note: For t2.micro, PM2 max_memory_restart is set to 400M to leave room for OS
+    # For larger instances (2GB+), increase --max-requests to 10-20 and max_memory_restart to 1G
     gunicorn -w 1 \
         -b 0.0.0.0:3001 \
         --timeout 300 \
         --graceful-timeout 30 \
-        --max-requests 20 \
-        --max-requests-jitter 3 \
+        --max-requests 5 \
+        --max-requests-jitter 2 \
         --worker-class sync \
-        --worker-connections 1000 \
+        --worker-connections 100 \
         --limit-request-line 8190 \
         --limit-request-fields 32768 \
-        --log-level info \
+        --log-level warning \
         --access-logfile - \
         --error-logfile - \
         app:app
@@ -54,12 +54,13 @@ else
         -b 0.0.0.0:3001 \
         --timeout 300 \
         --graceful-timeout 30 \
-        --max-requests 20 \
-        --max-requests-jitter 3 \
+        --max-requests 5 \
+        --max-requests-jitter 2 \
         --worker-class sync \
+        --worker-connections 100 \
         --limit-request-line 8190 \
         --limit-request-fields 32768 \
-        --log-level info \
+        --log-level warning \
         --access-logfile - \
         --error-logfile - \
         app:app
