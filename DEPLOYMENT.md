@@ -51,8 +51,8 @@ chmod +x run.sh
 
 The service is configured with:
 - **1 worker process** (reduces memory usage)
-- **Auto-restart after 50 requests** (prevents memory leaks)
-- **1.5GB memory limit** (PM2 will restart if exceeded - increased for large payloads)
+- **Auto-restart after 30 requests** (prevents memory leaks - reduced from 50)
+- **2GB memory limit** (PM2 will restart if exceeded - increased for large payloads and ML models)
 - **5-minute timeout** for large video processing
 
 ## Troubleshooting
@@ -86,7 +86,7 @@ pm2 restart siha-ai-sh
 1. Check memory: `free -h`
 2. Check logs: `pm2 logs siha-ai-sh --err`
 3. Reduce worker count in `run.sh` (already set to 1)
-4. Reduce `--max-requests` in `run.sh` (currently 50)
+4. Reduce `--max-requests` in `run.sh` (currently 30)
 
 ## Health Check
 

@@ -21,8 +21,8 @@ if command -v gunicorn &> /dev/null; then
     # Production settings for large payloads:
     # -w 1: 1 worker process (reduces memory usage, prevents OOM kills)
     # --timeout 300: 5 minute timeout for large video processing
-    # --max-requests 50: Restart workers more frequently to prevent memory leaks
-    # --max-requests-jitter 10: Randomize restart to avoid all workers restarting at once
+    # --max-requests 30: Restart workers more frequently to prevent memory leaks (reduced from 50)
+    # --max-requests-jitter 5: Randomize restart to avoid all workers restarting at once (reduced)
     # --worker-class sync: Use sync workers (better for CPU-intensive tasks)
     # --worker-connections 1000: Max connections per worker
     # --limit-request-line 8190: Increase max request line size
@@ -31,8 +31,8 @@ if command -v gunicorn &> /dev/null; then
     gunicorn -w 1 \
         -b 0.0.0.0:3001 \
         --timeout 300 \
-        --max-requests 50 \
-        --max-requests-jitter 10 \
+        --max-requests 30 \
+        --max-requests-jitter 5 \
         --worker-class sync \
         --worker-connections 1000 \
         --limit-request-line 8190 \
@@ -47,8 +47,8 @@ else
     gunicorn -w 1 \
         -b 0.0.0.0:3001 \
         --timeout 300 \
-        --max-requests 50 \
-        --max-requests-jitter 10 \
+        --max-requests 30 \
+        --max-requests-jitter 5 \
         --worker-class sync \
         --limit-request-line 8190 \
         --limit-request-fields 32768 \

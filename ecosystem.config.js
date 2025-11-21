@@ -8,7 +8,7 @@ module.exports = {
     exec_mode: 'fork',
     autorestart: true,
     watch: false,
-    max_memory_restart: '1.5G', // Restart if memory exceeds 1.5GB (increased for large payloads)
+    max_memory_restart: '2G', // Restart if memory exceeds 2GB (increased for large payloads and ML models)
     env: {
       NODE_ENV: 'production',
       PORT: 3001,
