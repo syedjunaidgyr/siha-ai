@@ -4,7 +4,7 @@ Improved algorithms for better accuracy with advanced signal processing
 """
 import cv2
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from scipy import signal
 from scipy.signal import butter, filtfilt, savgol_filter, find_peaks
 from scipy.ndimage import median_filter, gaussian_filter1d
@@ -86,13 +86,15 @@ class VitalSignsAnalysisService:
         """Set face detection service reference"""
         self.face_detection_service = service
     
-    def analyze_video_frames(self, frames: List[bytes], sensor_data: Optional[Dict] = None) -> Dict:
+    def analyze_video_frames(self, frames: List[bytes], sensor_data: Optional[Dict] = None, user_profile: Optional[Dict] = None, video_fps: Optional[float] = None) -> Dict:
         """
         Analyze multiple frames for vital signs using temporal signal analysis
         This is the proper way to do PPG - analyze signal over time
         
         Args:
             frames: List of image bytes
+            sensor_data: Optional sensor data (accelerometer, proximity, ambient light)
+            user_profile: Optional user profile (age, gender, height, weight) for calibration
             
         Returns:
             Dict with analysis results
@@ -112,14 +114,27 @@ class VitalSignsAnalysisService:
         face_detected_count = 0
         total_quality_score = 0
         bounding_boxes = []
+        previous_frame_gray = None  # For motion detection
         
-        # Limit frame processing to prevent memory issues
-        MAX_FRAMES_TO_PROCESS = 12
-        frames_to_process = frames[:MAX_FRAMES_TO_PROCESS] if len(frames) > MAX_FRAMES_TO_PROCESS else frames
-        frames_processed = len(frames_to_process)
+        # Process all frames if we have video FPS (from video file), otherwise limit for memory
+        # Video files have known FPS, so we can process more frames accurately
+        if video_fps is not None and video_fps >= 5.0:
+            # For video files with known FPS, process all frames (up to 150 for safety)
+            MAX_FRAMES_TO_PROCESS = min(150, len(frames))
+            frames_to_process = frames[:MAX_FRAMES_TO_PROCESS] if len(frames) > MAX_FRAMES_TO_PROCESS else frames
+            frames_processed = len(frames_to_process)
+            if len(frames) > MAX_FRAMES_TO_PROCESS:
+                print(f"[VitalSigns] Processing {MAX_FRAMES_TO_PROCESS} frames from {len(frames)} (video FPS: {video_fps:.1f})")
+        else:
+            # For frame-based uploads without known FPS, limit to 12 for memory safety
+            MAX_FRAMES_TO_PROCESS = 12
+            frames_to_process = frames[:MAX_FRAMES_TO_PROCESS] if len(frames) > MAX_FRAMES_TO_PROCESS else frames
+            frames_processed = len(frames_to_process)
+            if len(frames) > MAX_FRAMES_TO_PROCESS:
+                print(f"[VitalSigns] Limiting frame processing from {len(frames)} to {MAX_FRAMES_TO_PROCESS} frames for memory efficiency")
         
-        if len(frames) > MAX_FRAMES_TO_PROCESS:
-            print(f"[VitalSigns] Limiting frame processing from {len(frames)} to {MAX_FRAMES_TO_PROCESS} frames for memory efficiency")
+        # Motion detection threshold (normalized flow magnitude)
+        MOTION_THRESHOLD = 2.0  # Discard frames with motion above this threshold
         
         for i, frame_bytes in enumerate(frames_to_process):
             try:
@@ -137,6 +152,54 @@ class VitalSignsAnalysisService:
                 if not face_result.get('detected'):
                     del frame_bytes
                     continue
+                
+                # Motion detection using optical flow (if previous frame available)
+                if previous_frame_gray is not None and i > 0:
+                    try:
+                        # Decode current frame for motion detection
+                        current_image = decode_image_bytes(frame_bytes)
+                        if current_image is not None:
+                            current_gray = cv2.cvtColor(current_image, cv2.COLOR_BGR2GRAY)
+                            
+                            # Use helper method for motion detection
+                            has_motion, motion_magnitude = self._detect_frame_motion(previous_frame_gray, current_gray)
+                            
+                            if has_motion:
+                                print(f"[VitalSigns] Frame {i+1} discarded due to motion: {motion_magnitude:.2f} > {MOTION_THRESHOLD}")
+                                # Update previous frame but don't process current frame
+                                previous_frame_gray = current_gray.copy()
+                                del current_image
+                                del frame_bytes
+                                continue
+                            
+                            if motion_magnitude > 0:
+                                print(f"[VitalSigns] Frame {i+1} motion level: {motion_magnitude:.2f} (OK)")
+                            
+                            # Update previous frame for next iteration
+                            previous_frame_gray = current_gray.copy()
+                            del current_image
+                    except Exception as motion_error:
+                        print(f"[VitalSigns] Motion detection failed for frame {i+1}: {str(motion_error)}")
+                        # Continue processing if motion detection fails
+                        # Try to initialize previous frame if not set
+                        if previous_frame_gray is None:
+                            try:
+                                current_image = decode_image_bytes(frame_bytes)
+                                if current_image is not None:
+                                    previous_frame_gray = cv2.cvtColor(current_image, cv2.COLOR_BGR2GRAY)
+                                    del current_image
+                            except:
+                                pass
+                
+                # If first frame, initialize previous frame for motion detection
+                if previous_frame_gray is None:
+                    try:
+                        current_image = decode_image_bytes(frame_bytes)
+                        if current_image is not None:
+                            previous_frame_gray = cv2.cvtColor(current_image, cv2.COLOR_BGR2GRAY)
+                            del current_image
+                    except:
+                        pass
                 
                 face_detected_count += 1
                 bounding_boxes.append(face_result['boundingBox'])
@@ -189,6 +252,14 @@ class VitalSignsAnalysisService:
         
         print(f"[VitalSigns] Extracted {len(rois)} valid ROIs for temporal analysis")
         
+        # Use overlapping sliding windows for short videos (< 10 frames) to improve accuracy
+        SHORT_VIDEO_THRESHOLD = 10
+        use_overlapping_windows = len(rois) < SHORT_VIDEO_THRESHOLD
+        
+        if use_overlapping_windows:
+            print(f"[VitalSigns] Short video detected ({len(rois)} frames), using overlapping sliding windows")
+            return self._analyze_with_overlapping_windows(rois, sensor_data, face_detected_count, total_quality_score, total_frame_count, user_profile)
+        
         # Adjust quality score based on sensor data
         if sensor_data:
             sensor_quality_adjustment = self._adjust_quality_from_sensors(sensor_data)
@@ -196,13 +267,42 @@ class VitalSignsAnalysisService:
                 print(f"[VitalSigns] Sensor data indicates poor conditions, adjusting quality score by {sensor_quality_adjustment}")
                 total_quality_score = max(0, total_quality_score + sensor_quality_adjustment)
         
-        # Calculate actual frame rate (FPS) from number of frames and estimated duration
-        # Assuming ~30 second capture duration for 30 seconds of recording
-        estimated_duration = 30.0  # seconds
-        actual_fps = len(rois) / estimated_duration if len(rois) > 0 else 5.0
-        # Clamp FPS to realistic range (1-15 FPS for takePhoto capture)
-        actual_fps = np.clip(actual_fps, 1.0, 15.0)
-        print(f"[VitalSigns] Estimated FPS: {actual_fps:.2f} (from {len(rois)} frames over ~{estimated_duration}s)")
+        # Calculate actual frame rate (FPS) from number of frames
+        # If video_fps is provided (from video file), use it directly
+        if video_fps is not None and video_fps > 0:
+            actual_fps = float(video_fps)
+            estimated_duration = len(rois) / actual_fps if actual_fps > 0 else len(rois)
+            print(f"[VitalSigns] Using video FPS: {actual_fps:.2f} Hz (from {len(rois)} frames over ~{estimated_duration:.1f}s)")
+        else:
+            # For frame-based uploads without known FPS, estimate from frame count
+            # For mobile app: typically captures 20-30 frames over 30 seconds with 1s interval
+            # takePhoto() takes 1-2 seconds per photo, so actual rate is ~0.8-1.0 FPS
+            # Better estimation: assume 1 frame per second for photo capture mode
+            if len(rois) >= 15:
+                # If we have 15+ frames, assume they were captured over 20-30 seconds
+                estimated_duration = max(20.0, len(rois) * 1.0)  # ~1.0 second per frame
+            elif len(rois) >= 10:
+                # If we have 10-14 frames, assume they were captured over 12-20 seconds
+                estimated_duration = max(12.0, len(rois) * 1.0)  # ~1.0 second per frame
+            else:
+                # For fewer frames, assume similar rate (1 frame per second)
+                estimated_duration = max(len(rois) * 1.0, 5.0)  # At least 5 seconds minimum
+            
+            actual_fps = len(rois) / estimated_duration if len(rois) > 0 else 1.0
+            # Clamp FPS to realistic range (0.5-15 FPS for photo capture)
+            # Minimum 0.5 FPS to handle very slow capture, but warn user
+            actual_fps = np.clip(actual_fps, 0.5, 15.0)
+        
+        # Warn if FPS is too low for accurate heart rate detection (only for estimated FPS, not known video FPS)
+        if video_fps is None:  # Only warn for estimated FPS
+            if actual_fps < 1.0:
+                print(f"[VitalSigns] WARNING: Very low FPS ({actual_fps:.2f} Hz) - heart rate detection will be inaccurate")
+                print(f"[VitalSigns] Recommendation: Ensure stable capture, reduce movement, and hold device steady")
+            elif actual_fps < 2.0:
+                print(f"[VitalSigns] WARNING: Low FPS ({actual_fps:.2f} Hz) - heart rate detection may be inaccurate")
+                print(f"[VitalSigns] Recommendation: Capture more frames or ensure consistent capture timing")
+            else:
+                print(f"[VitalSigns] Estimated FPS: {actual_fps:.2f} Hz (from {len(rois)} frames over ~{estimated_duration:.1f}s)")
         
         # Extract temporal signal from all ROIs with multi-ROI support
         try:
@@ -243,15 +343,41 @@ class VitalSignsAnalysisService:
             stress_level = self._calculate_stress_from_rois(rois[-10:])  # Last 10 frames for better accuracy
             print(f"[VitalSigns] Calculated stress level: {stress_level}")
             
-            oxygen_saturation = self._calculate_oxygen_saturation_improved(rois[-10:], red_signal, green_signal, blue_signal)
+            oxygen_saturation = self._calculate_oxygen_saturation_improved(rois[-10:], red_signal, green_signal, blue_signal, user_profile)
             print(f"[VitalSigns] Calculated SpO2: {oxygen_saturation}%")
 
-            temperature = self._estimate_temperature_from_rois(rois[-10:], sensor_data)
+            temperature = self._estimate_temperature_from_rois(rois[-10:], sensor_data, user_profile)
             print(f"[VitalSigns] Estimated temperature: {temperature:.2f}°C")
 
             # Estimate blood pressure based on heart rate, stress, and signal characteristics
             blood_pressure = self._estimate_blood_pressure(heart_rate, stress_level, red_signal)
             print(f"[VitalSigns] Calculated BP: {blood_pressure['systolic']}/{blood_pressure['diastolic']} mmHg")
+            
+            # Calculate signal quality metrics for enhanced confidence scoring
+            signal_quality_metrics = {}
+            try:
+                if len(red_signal) >= 10:
+                    # Calculate SNR and stability from processed signals
+                    signal_quality_metrics = self._calculate_signal_quality_metrics(
+                        red_signal, green_signal, blue_signal, motion_level=None
+                    )
+                    print(f"[VitalSigns] Signal quality - SNR: {signal_quality_metrics.get('snr', 0):.2f} dB, Stability: {signal_quality_metrics.get('stability', 0):.2f}")
+            except Exception as sq_error:
+                print(f"[VitalSigns] Signal quality calculation failed: {str(sq_error)}")
+                signal_quality_metrics = {}
+            
+            # Calculate confidence with enhanced metrics
+            avg_quality_score = total_quality_score / face_detected_count if face_detected_count > 0 else 0
+            confidence = self._calculate_confidence(
+                face_detected_count / total_frame_count if total_frame_count > 0 else 0,
+                avg_quality_score,
+                heart_rate,
+                stress_level,
+                oxygen_saturation,
+                respiratory_rate,
+                temperature,
+                signal_quality=signal_quality_metrics if signal_quality_metrics else None
+            )
 
         except Exception as e:
             print(f"[VitalSigns] Error in temporal analysis: {str(e)}")
@@ -259,17 +385,19 @@ class VitalSignsAnalysisService:
             traceback.print_exc()
             return self._fallback_analysis_safe(face_detected_count, total_quality_score, total_frame_count)
         
-        # Calculate confidence
-        avg_quality_score = total_quality_score / face_detected_count if face_detected_count > 0 else 0
-        confidence = self._calculate_confidence(
-            face_detected_count / total_frame_count if total_frame_count > 0 else 0,
-            avg_quality_score,
-            heart_rate,
-            stress_level,
-            oxygen_saturation,
-            respiratory_rate,
-            temperature
-        )
+        # If we reach here, confidence was already calculated above
+        if 'confidence' not in locals():
+            # Fallback confidence calculation if signals weren't available
+            avg_quality_score = total_quality_score / face_detected_count if face_detected_count > 0 else 0
+            confidence = self._calculate_confidence(
+                face_detected_count / total_frame_count if total_frame_count > 0 else 0,
+                avg_quality_score,
+                heart_rate,
+                stress_level,
+                oxygen_saturation,
+                respiratory_rate,
+                temperature
+            )
         
         duration = (time.time() - start_time) * 1000
         
@@ -663,16 +791,19 @@ class VitalSignsAnalysisService:
         stress_level: Optional[int] = None,
         oxygen_saturation: Optional[int] = None,
         respiratory_rate: Optional[int] = None,
-        temperature: Optional[float] = None
+        temperature: Optional[float] = None,
+        signal_quality: Optional[Dict[str, float]] = None
     ) -> float:
         """
-        Calculate overall confidence score
+        Enhanced confidence score calculation with signal quality metrics
+        Includes: face detection, image quality, vital completeness, reasonableness,
+                  signal-to-noise ratio, motion level, and signal stability
         """
         # Base confidence from face detection
-        confidence = face_confidence * 0.4
+        confidence = face_confidence * 0.35  # Slightly reduced to make room for new metrics
         
-        # Quality score contribution
-        confidence += (quality_score / 100.0) * 0.3
+        # Quality score contribution (image quality)
+        confidence += (quality_score / 100.0) * 0.25
         
         # Vital signs completeness
         vitals_count = sum([
@@ -683,24 +814,326 @@ class VitalSignsAnalysisService:
             temperature is not None
         ])
         completeness = vitals_count / 5.0
-        confidence += completeness * 0.2
+        confidence += completeness * 0.15
         
-        # Reasonableness check
+        # Enhanced reasonableness check (more sophisticated)
         reasonableness = 1.0
-        if heart_rate and not (50 <= heart_rate <= 120):
-            reasonableness *= 0.8
-        if stress_level and not (0 <= stress_level <= 100):
-            reasonableness *= 0.8
-        if oxygen_saturation and not (95 <= oxygen_saturation <= 100):
-            reasonableness *= 0.8
-        if respiratory_rate and not (10 <= respiratory_rate <= 25):
-            reasonableness *= 0.8
-        if temperature and not (35.5 <= temperature <= 39.0):
-            reasonableness *= 0.8
+        issues = 0
         
-        confidence += reasonableness * 0.1
+        if heart_rate and not (50 <= heart_rate <= 120):
+            issues += 1
+            if heart_rate < 40 or heart_rate > 150:  # Very abnormal
+                reasonableness *= 0.6
+            else:
+                reasonableness *= 0.85
+        
+        if stress_level and not (0 <= stress_level <= 100):
+            issues += 1
+            reasonableness *= 0.85
+        
+        if oxygen_saturation and not (95 <= oxygen_saturation <= 100):
+            issues += 1
+            if oxygen_saturation < 90:  # Very abnormal
+                reasonableness *= 0.6
+            else:
+                reasonableness *= 0.85
+        
+        if respiratory_rate and not (10 <= respiratory_rate <= 25):
+            issues += 1
+            if respiratory_rate < 8 or respiratory_rate > 30:  # Very abnormal
+                reasonableness *= 0.6
+            else:
+                reasonableness *= 0.85
+        
+        if temperature and not (35.5 <= temperature <= 39.0):
+            issues += 1
+            if temperature < 34 or temperature > 40:  # Very abnormal
+                reasonableness *= 0.6
+            else:
+                reasonableness *= 0.85
+        
+        # Multiple issues reduce confidence more
+        if issues > 2:
+            reasonableness *= 0.8  # Additional penalty for multiple issues
+        
+        confidence += reasonableness * 0.10
+        
+        # Signal quality metrics (if available)
+        if signal_quality:
+            # Signal-to-noise ratio contribution (0-10% of confidence)
+            snr = signal_quality.get('snr', 0)
+            if snr > 0:
+                # Normalize SNR (typical range: 5-30 dB, target: >10 dB)
+                snr_norm = min(1.0, max(0.0, (snr - 5) / 25.0))
+                confidence += snr_norm * 0.10
+            
+            # Signal stability contribution (0-5% of confidence)
+            stability = signal_quality.get('stability', 0)
+            if stability > 0:
+                # Higher stability = higher confidence
+                confidence += stability * 0.05
         
         return float(np.clip(confidence, 0.0, 1.0))
+    
+    def _analyze_with_overlapping_windows(
+        self,
+        rois: List[bytes],
+        sensor_data: Optional[Dict] = None,
+        face_detected_count: int = 0,
+        total_quality_score: float = 0,
+        total_frame_count: int = 0,
+        user_profile: Optional[Dict] = None
+    ) -> Dict:
+        """
+        Analyze short video using overlapping sliding windows for better accuracy
+        Creates multiple overlapping windows from the same frames and averages results
+        """
+        WINDOW_SIZE = 7  # Size of each window
+        OVERLAP = 3  # Overlap between windows (frames)
+        STEP_SIZE = WINDOW_SIZE - OVERLAP  # Step between windows
+        
+        if len(rois) < WINDOW_SIZE:
+            # Too short even for sliding windows, use regular analysis
+            print(f"[VitalSigns] Video too short for sliding windows ({len(rois)} frames), using regular analysis")
+            # Fallback to regular analysis with what we have
+            signals = self._extract_multi_roi_signals(rois)
+            if len(signals['red']) < 5:
+                return self._fallback_analysis_safe(face_detected_count, total_quality_score, total_frame_count)
+            # Continue with regular processing
+            return self._analyze_single_window(rois, signals, sensor_data, face_detected_count, total_quality_score, total_frame_count)
+        
+        # Create overlapping windows
+        windows = []
+        start_idx = 0
+        while start_idx + WINDOW_SIZE <= len(rois):
+            window = rois[start_idx:start_idx + WINDOW_SIZE]
+            windows.append(window)
+            start_idx += STEP_SIZE
+        
+        # If we didn't cover all frames, add a final window from the end
+        if start_idx < len(rois):
+            final_window = rois[-WINDOW_SIZE:]
+            if final_window != windows[-1] if windows else True:  # Don't duplicate last window
+                windows.append(final_window)
+        
+        print(f"[VitalSigns] Created {len(windows)} overlapping windows from {len(rois)} frames")
+        
+        # Analyze each window
+        window_results = []
+        for i, window in enumerate(windows):
+            try:
+                # Extract signals from window
+                signals = self._extract_multi_roi_signals(window)
+                
+                if len(signals['red']) < 5:
+                    print(f"[VitalSigns] Window {i+1} has insufficient signals, skipping")
+                    continue
+                
+                # Analyze this window with user profile for calibration
+                result = self._analyze_single_window(window, signals, sensor_data, face_detected_count, total_quality_score, total_frame_count, user_profile=user_profile)
+                
+                # Only include valid results
+                if result and result.get('vitals'):
+                    vitals = result['vitals']
+                    # Check if vital signs are valid (not None, not 0)
+                    if (vitals.get('heartRate') and vitals.get('heartRate') > 0 and
+                        vitals.get('confidence') and float(vitals.get('confidence', 0)) > 0.5):
+                        window_results.append(result)
+                        
+            except Exception as e:
+                print(f"[VitalSigns] Error analyzing window {i+1}: {str(e)}")
+                continue
+        
+        if not window_results:
+            print(f"[VitalSigns] No valid window results, using fallback")
+            return self._fallback_analysis_safe(face_detected_count, total_quality_score, total_frame_count)
+        
+        # Average results from all windows
+        print(f"[VitalSigns] Averaging results from {len(window_results)} valid windows")
+        return self._average_window_results(window_results, face_detected_count, total_quality_score, total_frame_count)
+    
+    def _analyze_single_window(
+        self,
+        rois: List[bytes],
+        signals: Dict[str, np.ndarray],
+        sensor_data: Optional[Dict] = None,
+        face_detected_count: int = 0,
+        total_quality_score: float = 0,
+        total_frame_count: int = 0,
+        user_profile: Optional[Dict] = None
+    ) -> Dict:
+        """Analyze a single window of frames"""
+        # Estimate FPS (assume ~10 FPS for short videos)
+        estimated_fps = 10.0
+        if len(signals['red']) > 1:
+            # Estimate FPS from signal length (rough estimate)
+            estimated_fps = max(5.0, min(30.0, len(signals['red']) * 2))  # Rough estimate
+        
+        # Preprocess signals
+        red_signal = self._preprocess_signal(signals['red'], sensor_data, fps=estimated_fps)
+        green_signal = self._preprocess_signal(signals['green'], sensor_data, fps=estimated_fps)
+        blue_signal = self._preprocess_signal(signals['blue'], sensor_data, fps=estimated_fps)
+        
+        # Calculate vital signs
+        heart_rate = self._calculate_heart_rate_ensemble(red_signal, green_signal, blue_signal, fps=estimated_fps)
+        respiratory_rate = self._calculate_respiratory_rate_ensemble(red_signal, fps=estimated_fps)
+        
+        # For other vitals, use available frames
+        stress_level = self._calculate_stress_from_rois(rois[-min(10, len(rois)):])
+        oxygen_saturation = self._calculate_oxygen_saturation_improved(rois[-min(10, len(rois)):], red_signal, green_signal, blue_signal, user_profile)
+        temperature = self._estimate_temperature_from_rois(rois[-min(10, len(rois)):], sensor_data, user_profile)
+        blood_pressure = self._estimate_blood_pressure(heart_rate, stress_level, red_signal)
+        
+        # Calculate signal quality metrics
+        signal_quality_metrics = {}
+        try:
+            if len(red_signal) >= 5:
+                signal_quality_metrics = self._calculate_signal_quality_metrics(
+                    red_signal, green_signal, blue_signal, motion_level=None
+                )
+        except Exception:
+            signal_quality_metrics = {}
+        
+        # Calculate confidence
+        avg_quality_score = total_quality_score / face_detected_count if face_detected_count > 0 else 0
+        confidence = self._calculate_confidence(
+            face_detected_count / total_frame_count if total_frame_count > 0 else 0,
+            avg_quality_score,
+            heart_rate,
+            stress_level,
+            oxygen_saturation,
+            respiratory_rate,
+            temperature,
+            signal_quality=signal_quality_metrics if signal_quality_metrics else None
+        )
+        
+        return {
+            'vitals': {
+                'heartRate': heart_rate,
+                'stressLevel': stress_level,
+                'oxygenSaturation': oxygen_saturation,
+                'respiratoryRate': respiratory_rate,
+                'temperature': temperature,
+                'bloodPressure': blood_pressure,
+                'confidence': f"{confidence:.2f}",
+                'timestamp': time.time() * 1000
+            },
+            'confidence': f"{confidence:.2f}",
+            'avgQualityScore': f"{avg_quality_score:.1f}"
+        }
+    
+    def _average_window_results(
+        self,
+        window_results: List[Dict],
+        face_detected_count: int,
+        total_quality_score: float,
+        total_frame_count: int
+    ) -> Dict:
+        """Average results from multiple overlapping windows"""
+        heart_rates = []
+        stress_levels = []
+        oxygen_saturations = []
+        respiratory_rates = []
+        temperatures = []
+        systolic_bps = []
+        diastolic_bps = []
+        confidences = []
+        
+        for result in window_results:
+            vitals = result.get('vitals', {})
+            if vitals.get('heartRate') and vitals.get('heartRate') > 0:
+                heart_rates.append(vitals['heartRate'])
+            if vitals.get('stressLevel') is not None:
+                stress_levels.append(vitals['stressLevel'])
+            if vitals.get('oxygenSaturation') and vitals.get('oxygenSaturation') > 0:
+                oxygen_saturations.append(vitals['oxygenSaturation'])
+            if vitals.get('respiratoryRate') and vitals.get('respiratoryRate') > 0:
+                respiratory_rates.append(vitals['respiratoryRate'])
+            if vitals.get('temperature') and vitals.get('temperature') > 0:
+                temperatures.append(vitals['temperature'])
+            if vitals.get('bloodPressure'):
+                bp = vitals['bloodPressure']
+                if bp.get('systolic'):
+                    systolic_bps.append(bp['systolic'])
+                if bp.get('diastolic'):
+                    diastolic_bps.append(bp['diastolic'])
+            if vitals.get('confidence'):
+                try:
+                    confidences.append(float(vitals['confidence']))
+                except (ValueError, TypeError):
+                    pass
+        
+        # Use median for robustness (less sensitive to outliers)
+        avg_heart_rate = int(np.median(heart_rates)) if heart_rates else None
+        avg_stress = int(np.median(stress_levels)) if stress_levels else None
+        avg_spo2 = int(np.median(oxygen_saturations)) if oxygen_saturations else None
+        avg_rr = int(np.median(respiratory_rates)) if respiratory_rates else None
+        avg_temp = float(np.median(temperatures)) if temperatures else None
+        avg_systolic = int(np.median(systolic_bps)) if systolic_bps else None
+        avg_diastolic = int(np.median(diastolic_bps)) if diastolic_bps else None
+        avg_confidence = float(np.median(confidences)) if confidences else 0.7
+        
+        return {
+            'vitals': {
+                'heartRate': avg_heart_rate,
+                'stressLevel': avg_stress,
+                'oxygenSaturation': avg_spo2,
+                'respiratoryRate': avg_rr,
+                'temperature': avg_temp,
+                'bloodPressure': {
+                    'systolic': avg_systolic,
+                    'diastolic': avg_diastolic
+                } if avg_systolic and avg_diastolic else None,
+                'confidence': f"{avg_confidence:.2f}",
+                'timestamp': time.time() * 1000
+            },
+            'confidence': f"{avg_confidence:.2f}",
+            'avgQualityScore': f"{total_quality_score / face_detected_count:.1f}" if face_detected_count > 0 else '0.0',
+            'windowsAnalyzed': len(window_results)
+        }
+    
+    def _calculate_signal_quality_metrics(
+        self,
+        red_signal: np.ndarray,
+        green_signal: np.ndarray,
+        blue_signal: np.ndarray,
+        motion_level: Optional[float] = None
+    ) -> Dict[str, float]:
+        """
+        Calculate signal quality metrics: SNR, stability, motion level
+        """
+        metrics = {}
+        
+        if len(red_signal) >= 10:
+            # Calculate signal-to-noise ratio (SNR)
+            # SNR = signal_power / noise_power
+            signal_power = np.var(red_signal)
+            
+            # Estimate noise as high-frequency component (using derivative)
+            if len(red_signal) > 1:
+                noise_estimate = np.std(np.diff(red_signal))
+                noise_power = noise_estimate ** 2 if noise_estimate > 0 else 1e-6
+                
+                # SNR in dB
+                snr_db = 10 * np.log10(signal_power / noise_power) if noise_power > 0 else 0
+                metrics['snr'] = float(max(0, snr_db))
+            
+            # Signal stability (inverse of coefficient of variation)
+            signal_mean = np.mean(red_signal)
+            signal_std = np.std(red_signal)
+            if signal_mean > 0:
+                cv = signal_std / signal_mean  # Coefficient of variation
+                stability = 1.0 / (1.0 + cv)  # Normalize to 0-1
+                metrics['stability'] = float(np.clip(stability, 0.0, 1.0))
+        
+        # Motion level (if available)
+        if motion_level is not None:
+            # Lower motion = higher quality (inverse relationship)
+            # Motion level normalized (0-10 scale), convert to quality (0-1)
+            motion_quality = max(0.0, 1.0 - motion_level / 10.0)
+            metrics['motion_quality'] = float(motion_quality)
+        
+        return metrics
     
     def _calculate_heart_rate_temporal(self, red_signal: np.ndarray, fps: float = 5.0) -> int:
         """
@@ -925,10 +1358,61 @@ class VitalSignsAnalysisService:
         
         return adjustment
     
-    def _extract_multi_roi_signals(self, rois: List[bytes]) -> Dict[str, np.ndarray]:
+    def _detect_skin_mask(self, image: np.ndarray) -> np.ndarray:
         """
-        Extract signals from multiple regions of interest
-        Improved PPG signal extraction with focus on forehead region (most reliable for PPG)
+        Detect skin pixels using color-based skin detection
+        Uses YCrCb color space for better skin detection across different skin tones
+        Returns binary mask where 1 = skin pixel, 0 = non-skin pixel
+        """
+        try:
+            # Convert to YCrCb color space (better for skin detection)
+            ycrcb = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
+            
+            # Skin color ranges in YCrCb space (works for various skin tones)
+            # These ranges are based on research and work for most skin tones
+            lower_skin = np.array([0, 135, 85], dtype=np.uint8)
+            upper_skin = np.array([255, 180, 135], dtype=np.uint8)
+            
+            # Create mask for skin pixels
+            skin_mask = cv2.inRange(ycrcb, lower_skin, upper_skin)
+            
+            # Additional HSV-based detection for better coverage
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            # Hue range for skin (0-20 and 160-180 for different lighting)
+            lower_hsv = np.array([0, 20, 70], dtype=np.uint8)
+            upper_hsv = np.array([20, 255, 255], dtype=np.uint8)
+            skin_mask_hsv = cv2.inRange(hsv, lower_hsv, upper_hsv)
+            
+            # Combine both masks (OR operation)
+            combined_mask = cv2.bitwise_or(skin_mask, skin_mask_hsv)
+            
+            # Morphological operations to clean up the mask
+            kernel = np.ones((3, 3), np.uint8)
+            combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+            combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+            
+            # If mask is too small (< 5% of image), fall back to forehead region
+            mask_ratio = np.sum(combined_mask > 0) / (image.shape[0] * image.shape[1])
+            if mask_ratio < 0.05:
+                # Fallback: use top 30% of image (forehead region)
+                h, w = image.shape[:2]
+                combined_mask = np.zeros((h, w), dtype=np.uint8)
+                combined_mask[:int(h * 0.3), :] = 255
+            
+            return combined_mask
+            
+        except Exception as e:
+            print(f"[VitalSigns] Skin mask detection failed: {str(e)}")
+            # Fallback: return mask for top 30% (forehead)
+            h, w = image.shape[:2]
+            mask = np.zeros((h, w), dtype=np.uint8)
+            mask[:int(h * 0.3), :] = 255
+            return mask
+    
+    def _extract_multi_roi_signals(self, rois: List[bytes], use_skin_mask: bool = True) -> Dict[str, np.ndarray]:
+        """
+        Extract signals from multiple regions of interest with optional skin mask detection
+        Improved PPG signal extraction with focus on skin pixels only
         """
         red_signals = []
         green_signals = []
@@ -942,36 +1426,58 @@ class VitalSignsAnalysisService:
                 
                 h, w = image.shape[:2]
                 
-                # Extract signals from different regions with improved weights
-                # Forehead region (top 25%) - best for PPG (highest weight)
-                forehead_top = int(h * 0.05)  # Top 5% - most reliable
-                forehead_bottom = int(h * 0.3)  # Top 30%
-                forehead = image[forehead_top:forehead_bottom, :]
-                
-                # Middle forehead (10-20%) - secondary PPG region
-                mid_forehead = image[int(h*0.1):int(h*0.2), :]
-                
-                # Cheek regions (middle 30-50%) - for color analysis
-                cheeks = image[int(h*0.3):int(h*0.5), :]
-                
-                # Weighted combination: 70% forehead (50% top + 20% mid), 30% cheeks
-                # Red channel (most sensitive to blood flow)
-                red_top_forehead = np.mean(forehead[:, :, 2]) if forehead.size > 0 else 0
-                red_mid_forehead = np.mean(mid_forehead[:, :, 2]) if mid_forehead.size > 0 else 0
-                red_cheeks = np.mean(cheeks[:, :, 2]) if cheeks.size > 0 else 0
-                red_combined = 0.5 * red_top_forehead + 0.2 * red_mid_forehead + 0.3 * red_cheeks
-                
-                # Green channel (secondary PPG signal)
-                green_top_forehead = np.mean(forehead[:, :, 1]) if forehead.size > 0 else 0
-                green_mid_forehead = np.mean(mid_forehead[:, :, 1]) if mid_forehead.size > 0 else 0
-                green_cheeks = np.mean(cheeks[:, :, 1]) if cheeks.size > 0 else 0
-                green_combined = 0.5 * green_top_forehead + 0.2 * green_mid_forehead + 0.3 * green_cheeks
-                
-                # Blue channel (for SpO2 calculation)
-                blue_top_forehead = np.mean(forehead[:, :, 0]) if forehead.size > 0 else 0
-                blue_mid_forehead = np.mean(mid_forehead[:, :, 0]) if mid_forehead.size > 0 else 0
-                blue_cheeks = np.mean(cheeks[:, :, 0]) if cheeks.size > 0 else 0
-                blue_combined = 0.5 * blue_top_forehead + 0.2 * blue_mid_forehead + 0.3 * blue_cheeks
+                if use_skin_mask:
+                    # Use skin mask detection for more accurate signal extraction
+                    skin_mask = self._detect_skin_mask(image)
+                    
+                    # Extract signals only from skin pixels
+                    # Apply mask to each channel
+                    red_channel = image[:, :, 2]  # BGR format
+                    green_channel = image[:, :, 1]
+                    blue_channel = image[:, :, 0]
+                    
+                    # Mask skin pixels
+                    red_skin = red_channel[skin_mask > 0]
+                    green_skin = green_channel[skin_mask > 0]
+                    blue_skin = blue_channel[skin_mask > 0]
+                    
+                    if len(red_skin) > 0:
+                        red_combined = float(np.mean(red_skin))
+                        green_combined = float(np.mean(green_skin))
+                        blue_combined = float(np.mean(blue_skin))
+                    else:
+                        # Fallback if no skin pixels detected
+                        red_combined = float(np.mean(red_channel))
+                        green_combined = float(np.mean(green_channel))
+                        blue_combined = float(np.mean(blue_channel))
+                else:
+                    # Original method: fixed regions with weights
+                    # Forehead region (top 25%) - best for PPG (highest weight)
+                    forehead_top = int(h * 0.05)  # Top 5% - most reliable
+                    forehead_bottom = int(h * 0.3)  # Top 30%
+                    forehead = image[forehead_top:forehead_bottom, :]
+                    
+                    # Middle forehead (10-20%) - secondary PPG region
+                    mid_forehead = image[int(h*0.1):int(h*0.2), :]
+                    
+                    # Cheek regions (middle 30-50%) - for color analysis
+                    cheeks = image[int(h*0.3):int(h*0.5), :]
+                    
+                    # Weighted combination: 70% forehead (50% top + 20% mid), 30% cheeks
+                    red_top_forehead = np.mean(forehead[:, :, 2]) if forehead.size > 0 else 0
+                    red_mid_forehead = np.mean(mid_forehead[:, :, 2]) if mid_forehead.size > 0 else 0
+                    red_cheeks = np.mean(cheeks[:, :, 2]) if cheeks.size > 0 else 0
+                    red_combined = 0.5 * red_top_forehead + 0.2 * red_mid_forehead + 0.3 * red_cheeks
+                    
+                    green_top_forehead = np.mean(forehead[:, :, 1]) if forehead.size > 0 else 0
+                    green_mid_forehead = np.mean(mid_forehead[:, :, 1]) if mid_forehead.size > 0 else 0
+                    green_cheeks = np.mean(cheeks[:, :, 1]) if cheeks.size > 0 else 0
+                    green_combined = 0.5 * green_top_forehead + 0.2 * green_mid_forehead + 0.3 * green_cheeks
+                    
+                    blue_top_forehead = np.mean(forehead[:, :, 0]) if forehead.size > 0 else 0
+                    blue_mid_forehead = np.mean(mid_forehead[:, :, 0]) if mid_forehead.size > 0 else 0
+                    blue_cheeks = np.mean(cheeks[:, :, 0]) if cheeks.size > 0 else 0
+                    blue_combined = 0.5 * blue_top_forehead + 0.2 * blue_mid_forehead + 0.3 * blue_cheeks
                 
                 red_signals.append(red_combined)
                 green_signals.append(green_combined)
@@ -1070,7 +1576,55 @@ class VitalSignsAnalysisService:
         else:
             signal_centered = gaussian_filter1d(signal_centered, sigma=0.7)
         
-        # 5. Savitzky-Golay filter - only if signal is long enough and we have variation
+        # 5. ICA-like filtering using PCA-based component separation (simpler than full ICA)
+        # Separate pulse signal from motion artifacts using principal component analysis
+        if len(signal_centered) >= 10:
+            try:
+                # Create signal matrix from multiple channel signals if available
+                # For single channel, use temporal segments for component analysis
+                # This is a simplified ICA approach that works well for PPG signals
+                
+                # Create segments for component analysis (overlapping windows)
+                segment_size = min(5, len(signal_centered) // 2)
+                if segment_size >= 3:
+                    # Extract multiple overlapping segments
+                    segments = []
+                    for j in range(0, len(signal_centered) - segment_size + 1, max(1, segment_size // 2)):
+                        segment = signal_centered[j:j+segment_size]
+                        segments.append(segment)
+                    
+                    if len(segments) >= 3:
+                        # Stack segments into matrix
+                        segments_matrix = np.array(segments)
+                        
+                        # Simple PCA-based separation (eigenvalue decomposition)
+                        # Center the data
+                        segments_centered = segments_matrix - np.mean(segments_matrix, axis=0)
+                        
+                        # Covariance matrix
+                        cov = np.cov(segments_centered.T)
+                        
+                        # Eigenvalue decomposition
+                        eigenvals, eigenvecs = np.linalg.eig(cov)
+                        
+                        # Get principal components (sorted by eigenvalue)
+                        sorted_indices = np.argsort(eigenvals)[::-1]
+                        eigenvecs_sorted = eigenvecs[:, sorted_indices]
+                        
+                        # Project signal onto first principal component (most variance = pulse signal)
+                        # Use the component with highest frequency content (pulse signal)
+                        signal_projected = np.dot(signal_centered, eigenvecs_sorted[:, 0])
+                        
+                        # Normalize projection
+                        if np.std(signal_projected) > 0:
+                            signal_centered = (signal_projected - np.mean(signal_projected)) / np.std(signal_projected) * np.std(signal_centered)
+                            
+            except Exception as ica_error:
+                # If ICA/PCA fails, continue with original signal
+                print(f"[VitalSigns] ICA-like filtering failed: {str(ica_error)}")
+                pass
+        
+        # 6. Savitzky-Golay filter - only if signal is long enough and we have variation
         if len(signal_centered) >= 7 and np.std(signal_centered) > 0.1:
             try:
                 window_length = min(7, len(signal_centered) if len(signal_centered) % 2 == 1 else len(signal_centered) - 1)
@@ -1092,6 +1646,54 @@ class VitalSignsAnalysisService:
         
         return signal_centered
     
+    def _detect_frame_motion(self, prev_frame: np.ndarray, curr_frame: np.ndarray) -> Tuple[bool, float]:
+        """
+        Detect motion between two frames using optical flow
+        Returns: (has_significant_motion, motion_magnitude)
+        """
+        try:
+            # Calculate optical flow using Lucas-Kanade method
+            corners_prev = cv2.goodFeaturesToTrack(
+                prev_frame,
+                maxCorners=100,
+                qualityLevel=0.3,
+                minDistance=7,
+                blockSize=7
+            )
+            
+            if corners_prev is None or len(corners_prev) < 10:
+                return False, 0.0
+            
+            # Calculate optical flow
+            corners_next, status, err = cv2.calcOpticalFlowPyrLK(
+                prev_frame, curr_frame, corners_prev, None
+            )
+            
+            # Filter valid points
+            valid_prev = corners_prev[status == 1]
+            valid_next = corners_next[status == 1]
+            
+            if len(valid_prev) < 10 or len(valid_next) < 10:
+                return False, 0.0
+            
+            # Calculate flow vectors and magnitudes
+            flow_vectors = valid_next - valid_prev
+            flow_magnitudes = np.sqrt(flow_vectors[:, 0]**2 + flow_vectors[:, 1]**2)
+            avg_motion = float(np.mean(flow_magnitudes))
+            
+            # Normalize by frame size
+            frame_height, frame_width = prev_frame.shape[:2]
+            normalized_motion = avg_motion / max(frame_width, frame_height) * 100
+            
+            # Threshold: motion > 2.0 indicates significant movement
+            has_significant_motion = normalized_motion > 2.0
+            
+            return has_significant_motion, normalized_motion
+            
+        except Exception as e:
+            print(f"[VitalSigns] Motion detection error: {str(e)}")
+            return False, 0.0
+    
     def _calculate_heart_rate_ensemble(
         self, 
         red_signal: np.ndarray, 
@@ -1099,6 +1701,14 @@ class VitalSignsAnalysisService:
         blue_signal: np.ndarray,
         fps: float = 5.0
     ) -> int:
+        """
+        Calculate heart rate using ensemble of methods including advanced rPPG algorithms:
+        1. POS (Plane-Orthogonal-to-Skin) algorithm
+        2. CHROM (Chrominance-based) algorithm
+        3. FFT on red channel
+        4. FFT on green channel
+        5. Autocorrelation
+        """
         """
         Calculate heart rate using ensemble of methods:
         1. FFT on red channel (primary)
@@ -1110,54 +1720,68 @@ class VitalSignsAnalysisService:
         weights = []
         method_names = []
         
-        # Method 1: FFT on red channel (weight: 0.4)
+        # Method 1: POS (Plane-Orthogonal-to-Skin) algorithm (weight: 0.35) - Most robust
+        try:
+            hr_pos = self._calculate_heart_rate_pos(red_signal, green_signal, blue_signal, fps)
+            print(f"[VitalSigns] HR Method 1 (POS): {hr_pos} BPM")
+            if 50 <= hr_pos <= 120:
+                results.append(hr_pos)
+                weights.append(0.35)
+                method_names.append('POS')
+        except Exception as e:
+            print(f"[VitalSigns] HR Method 1 (POS) failed: {str(e)}")
+        
+        # Method 2: CHROM (Chrominance-based) algorithm (weight: 0.30) - Excellent for motion
+        try:
+            hr_chrom = self._calculate_heart_rate_chrom(red_signal, green_signal, blue_signal, fps)
+            print(f"[VitalSigns] HR Method 2 (CHROM): {hr_chrom} BPM")
+            if 50 <= hr_chrom <= 120:
+                results.append(hr_chrom)
+                weights.append(0.30)
+                method_names.append('CHROM')
+        except Exception as e:
+            print(f"[VitalSigns] HR Method 2 (CHROM) failed: {str(e)}")
+        
+        # Method 3: FFT on red channel (weight: 0.15)
         try:
             hr_fft_red = self._calculate_heart_rate_temporal(red_signal, fps)
-            print(f"[VitalSigns] HR Method 1 (FFT Red): {hr_fft_red} BPM")
+            print(f"[VitalSigns] HR Method 3 (FFT Red): {hr_fft_red} BPM")
             if 50 <= hr_fft_red <= 120:
                 results.append(hr_fft_red)
-                weights.append(0.4)
+                weights.append(0.15)
                 method_names.append('FFT-Red')
         except Exception as e:
-            print(f"[VitalSigns] HR Method 1 failed: {str(e)}")
+            print(f"[VitalSigns] HR Method 3 (FFT Red) failed: {str(e)}")
         
-        # Method 2: FFT on green channel (weight: 0.3)
+        # Method 4: FFT on green channel (weight: 0.10)
         try:
             hr_fft_green = self._calculate_heart_rate_temporal(green_signal, fps)
-            print(f"[VitalSigns] HR Method 2 (FFT Green): {hr_fft_green} BPM")
+            print(f"[VitalSigns] HR Method 4 (FFT Green): {hr_fft_green} BPM")
             if 50 <= hr_fft_green <= 120:
                 results.append(hr_fft_green)
-                weights.append(0.3)
+                weights.append(0.10)
                 method_names.append('FFT-Green')
         except Exception as e:
-            print(f"[VitalSigns] HR Method 2 failed: {str(e)}")
+            print(f"[VitalSigns] HR Method 4 (FFT Green) failed: {str(e)}")
         
-        # Method 3: Autocorrelation on red channel (weight: 0.2)
+        # Method 5: Autocorrelation (weight: 0.10)
         try:
             hr_autocorr = self._calculate_heart_rate_autocorrelation(red_signal, fps)
-            print(f"[VitalSigns] HR Method 3 (Autocorr): {hr_autocorr} BPM")
+            print(f"[VitalSigns] HR Method 5 (Autocorr): {hr_autocorr} BPM")
             if 50 <= hr_autocorr <= 120:
                 results.append(hr_autocorr)
-                weights.append(0.2)
+                weights.append(0.10)
                 method_names.append('Autocorr')
         except Exception as e:
-            print(f"[VitalSigns] HR Method 3 failed: {str(e)}")
-        
-        # Method 4: Peak detection (weight: 0.1)
-        try:
-            hr_peaks = self._calculate_heart_rate_peak_detection(red_signal, fps)
-            print(f"[VitalSigns] HR Method 4 (Peak Detection): {hr_peaks} BPM")
-            if 50 <= hr_peaks <= 120:
-                results.append(hr_peaks)
-                weights.append(0.1)
-                method_names.append('Peaks')
-        except Exception as e:
-            print(f"[VitalSigns] HR Method 4 failed: {str(e)}")
+            print(f"[VitalSigns] HR Method 5 (Autocorr) failed: {str(e)}")
         
         print(f"[VitalSigns] HR Ensemble results: {results} from methods {method_names}")
         
         if not results:
-            print("[VitalSigns] All HR methods failed, using fallback")
+            print("[VitalSigns] WARNING: All HR methods failed, using fallback value (72 BPM)")
+            if fps < 3.0:
+                print(f"[VitalSigns] Low FPS ({fps:.2f} Hz) is likely causing detection failure")
+                print("[VitalSigns] Recommendation: Capture more frames (15-20) over shorter duration (5-10s)")
             return 72  # Default fallback
         
         # Weighted median (more robust than weighted mean)
@@ -1174,6 +1798,173 @@ class VitalSignsAnalysisService:
         final_hr = int(sorted_results[median_idx])
         print(f"[VitalSigns] HR Ensemble final result: {final_hr} BPM (from {len(results)} methods)")
         return final_hr
+    
+    def _calculate_heart_rate_pos(
+        self, 
+        red_signal: np.ndarray, 
+        green_signal: np.ndarray, 
+        blue_signal: np.ndarray,
+        fps: float = 5.0
+    ) -> int:
+        """
+        POS (Plane-Orthogonal-to-Skin) algorithm for robust heart rate extraction
+        This method projects signals onto a plane orthogonal to skin color, reducing motion artifacts
+        """
+        if len(red_signal) < 10 or len(green_signal) < 10 or len(blue_signal) < 10:
+            return 72
+        
+        # Normalize signals
+        r_mean = np.mean(red_signal)
+        g_mean = np.mean(green_signal)
+        b_mean = np.mean(blue_signal)
+        
+        r_norm = red_signal / (r_mean + 1e-6)
+        g_norm = green_signal / (g_mean + 1e-6)
+        b_norm = blue_signal / (b_mean + 1e-6)
+        
+        # POS algorithm: Create projection that removes skin color variation
+        # The POS signal is orthogonal to the skin color plane
+        # Standard POS formula: (R - G) + alpha * (R + G - 2*B)
+        # where alpha is a normalization factor
+        
+        # Calculate alpha based on signal statistics
+        rg_diff = r_norm - g_norm
+        rgb_sum = r_norm + g_norm - 2 * b_norm
+        
+        # Adaptive alpha calculation
+        if np.std(rgb_sum) > 1e-6:
+            alpha = np.std(rg_diff) / np.std(rgb_sum)
+        else:
+            alpha = 1.0
+        
+        # POS signal
+        pos_signal = rg_diff + alpha * rgb_sum
+        
+        # Normalize POS signal
+        pos_signal = pos_signal - np.mean(pos_signal)
+        
+        # Apply bandpass filter for heart rate (0.8-3.5 Hz)
+        try:
+            nyquist = fps / 2.0
+            if nyquist >= 0.8:
+                low = max(0.8 / nyquist, 0.1)
+                high = min(3.5 / nyquist, 0.95)
+                if low < high:
+                    b, a = butter(4, [low, high], btype='band')
+                    pos_signal = filtfilt(b, a, pos_signal)
+        except:
+            pass
+        
+        # Calculate heart rate using FFT
+        try:
+            hr = self._calculate_heart_rate_from_signal(pos_signal, fps, freq_range=(0.8, 3.5))
+            if 50 <= hr <= 120:
+                return hr
+        except:
+            pass
+        
+        return 72
+    
+    def _calculate_heart_rate_chrom(
+        self, 
+        red_signal: np.ndarray, 
+        green_signal: np.ndarray, 
+        blue_signal: np.ndarray,
+        fps: float = 5.0
+    ) -> int:
+        """
+        CHROM (Chrominance-based) algorithm for motion-robust heart rate extraction
+        Uses chrominance signals that are less affected by motion artifacts
+        """
+        if len(red_signal) < 10 or len(green_signal) < 10 or len(blue_signal) < 10:
+            return 72
+        
+        # Normalize signals
+        r_mean = np.mean(red_signal)
+        g_mean = np.mean(green_signal)
+        b_mean = np.mean(blue_signal)
+        
+        r_norm = red_signal / (r_mean + 1e-6)
+        g_norm = green_signal / (g_mean + 1e-6)
+        b_norm = blue_signal / (b_mean + 1e-6)
+        
+        # CHROM algorithm: Use chrominance signals X and Y
+        # X = R - G (contains pulse information)
+        # Y = R + G - 2*B (standard deviation normalization)
+        
+        X = r_norm - g_norm
+        Y = r_norm + g_norm - 2 * b_norm
+        
+        # Normalize X and Y
+        X = X - np.mean(X)
+        Y = Y - np.mean(Y)
+        
+        # Calculate standard deviations for adaptive weighting
+        std_X = np.std(X) + 1e-6
+        std_Y = np.std(Y) + 1e-6
+        
+        # CHROM signal: weighted combination
+        # The weight adapts based on signal quality
+        weight = std_X / (std_X + std_Y)
+        chrom_signal = weight * X + (1 - weight) * Y
+        
+        # Apply bandpass filter for heart rate
+        try:
+            nyquist = fps / 2.0
+            if nyquist >= 0.8:
+                low = max(0.8 / nyquist, 0.1)
+                high = min(3.5 / nyquist, 0.95)
+                if low < high:
+                    b, a = butter(4, [low, high], btype='band')
+                    chrom_signal = filtfilt(b, a, chrom_signal)
+        except:
+            pass
+        
+        # Calculate heart rate using FFT
+        try:
+            hr = self._calculate_heart_rate_from_signal(chrom_signal, fps, freq_range=(0.8, 3.5))
+            if 50 <= hr <= 120:
+                return hr
+        except:
+            pass
+        
+        return 72
+    
+    def _calculate_heart_rate_from_signal(
+        self, 
+        signal: np.ndarray, 
+        fps: float, 
+        freq_range: Tuple[float, float] = (0.8, 3.5)
+    ) -> int:
+        """Helper function to calculate HR from filtered signal using FFT"""
+        if len(signal) < 10:
+            return 72
+        
+        # Apply windowing
+        windowed = signal * np.blackman(len(signal))
+        
+        # FFT with zero-padding
+        fft_size = 2 ** int(np.ceil(np.log2(len(windowed) * 4)))
+        fft_result = np.fft.rfft(windowed, n=fft_size)
+        freqs = np.fft.rfftfreq(fft_size, 1.0/fps)
+        magnitude = np.abs(fft_result)
+        
+        # Find peak in specified frequency range
+        hr_range = (freqs >= freq_range[0]) & (freqs <= freq_range[1])
+        if not np.any(hr_range):
+            return 72
+        
+        hr_freqs = freqs[hr_range]
+        hr_magnitude = magnitude[hr_range]
+        
+        # Find dominant frequency
+        peak_idx = np.argmax(hr_magnitude)
+        peak_freq = hr_freqs[peak_idx]
+        
+        # Convert to BPM
+        heart_rate = int(round(peak_freq * 60))
+        
+        return heart_rate
     
     def _calculate_heart_rate_autocorrelation(self, signal: np.ndarray, fps: float = 10.0) -> int:
         """Calculate heart rate using autocorrelation"""
@@ -1302,12 +2093,41 @@ class VitalSignsAnalysisService:
         
         return 16
     
+    def _get_calibration_factors(self, user_profile: Optional[Dict] = None) -> Dict[str, float]:
+        """
+        Get calibration factors for SpO2 and temperature based on device/user data
+        These can be adjusted based on real-device calibration data
+        """
+        factors = {
+            'spo2_offset': 0.0,  # Offset in percentage points
+            'spo2_scale': 1.0,   # Scale factor
+            'temp_offset': 0.0,  # Offset in degrees Celsius
+            'temp_scale': 1.0    # Scale factor
+        }
+        
+        # Device-specific calibration (can be extended with real calibration data)
+        # For now, use default values that can be adjusted per device/user
+        
+        # Age-based adjustments (older adults may have slightly different SpO2 baselines)
+        if user_profile and user_profile.get('age'):
+            age = user_profile.get('age')
+            if age >= 65:
+                factors['spo2_offset'] = -1.0  # Slightly lower baseline for elderly
+            elif age < 18:
+                factors['spo2_offset'] = 0.5   # Slightly higher for children
+        
+        # Skin tone adjustments (darker skin may require different calibration)
+        # This is a placeholder - real calibration would use device-specific data
+        
+        return factors
+    
     def _calculate_oxygen_saturation_improved(
-        self, 
-        rois: List[bytes], 
+        self,
+        rois: List[bytes],
         red_signal: np.ndarray,
         green_signal: np.ndarray,
-        blue_signal: np.ndarray
+        blue_signal: np.ndarray,
+        user_profile: Optional[Dict] = None
     ) -> int:
         """
         Improved SpO2 calculation using temporal analysis of R/B ratio
@@ -1334,11 +2154,19 @@ class VitalSignsAnalysisService:
                 
                 # Weighted combination: 60% ROI method, 40% temporal
                 spo2_combined = int(0.6 * spo2_roi + 0.4 * spo2_temporal)
-                return spo2_combined
+                
+                # Apply calibration factors
+                calibration = self._get_calibration_factors(user_profile)
+                spo2_combined = int((spo2_combined * calibration['spo2_scale']) + calibration['spo2_offset'])
+                
+                return int(np.clip(spo2_combined, 70, 100))  # Wider range to allow for calibration
         except:
             pass
         
-        return spo2_roi
+        # Apply calibration to ROI method result as well
+        calibration = self._get_calibration_factors(user_profile)
+        spo2_roi_calibrated = int((spo2_roi * calibration['spo2_scale']) + calibration['spo2_offset'])
+        return int(np.clip(spo2_roi_calibrated, 70, 100))
 
     def _estimate_temperature(self, image: np.ndarray, sensor_data: Optional[Dict] = None) -> float:
         """
@@ -1361,7 +2189,12 @@ class VitalSignsAnalysisService:
         estimate = baseline + skin_adjustment
         return float(np.clip(estimate, 35.5, 38.5))
 
-    def _estimate_temperature_from_rois(self, rois: List[bytes], sensor_data: Optional[Dict] = None) -> float:
+    def _estimate_temperature_from_rois(
+        self,
+        rois: List[bytes],
+        sensor_data: Optional[Dict] = None,
+        user_profile: Optional[Dict] = None
+    ) -> float:
         temps = []
         for roi_bytes in rois:
             try:

@@ -10,6 +10,7 @@ import hashlib
 from datetime import datetime
 from typing import List, Dict, Optional
 import warnings
+import tempfile
 
 # Suppress OpenCV warnings about JPEG SOS parameters (harmless)
 os.environ['OPENCV_LOG_LEVEL'] = 'ERROR'
@@ -18,6 +19,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from PIL import Image
 import numpy as np
+import cv2
 
 from services.face_detection import FaceDetectionService
 from services.vital_signs import VitalSignsAnalysisService
@@ -27,9 +29,9 @@ from services.preventive_health import PreventiveHealthInsightsService
 app = Flask(__name__)
 CORS(app)
 
-# Increase max content length to handle large video payloads (50MB)
-# This allows the 40MB+ payloads we're seeing
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
+# Increase max content length to handle large video payloads (100MB)
+# 30-second videos at high quality can be 60-80MB
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB
 
 # Initialize services
 face_detection_service = FaceDetectionService()
@@ -112,6 +114,11 @@ def analyze_video():
                   f"proximity={sensor_data.get('proximity') is not None}, "
                   f"light={sensor_data.get('ambientLight') is not None}")
         
+        # Get user profile if provided (optional, for calibration and personalized baselines)
+        user_profile = data.get('userProfile')
+        if user_profile:
+            print(f"[AI Route] Received user profile: age={user_profile.get('age')}, gender={user_profile.get('gender')}")
+        
         print(f"[AI Route] Received analyze-video request: {len(frames_base64)} frames")
         
         # Convert base64 strings to image buffers with memory optimization
@@ -140,12 +147,15 @@ def analyze_video():
                     del frame_bytes
                     continue
                 
-                # Validate JPEG header (should start with FF D8 FF)
-                if frame_bytes[:3] != b'\xff\xd8\xff':
-                    print(f"[AI Route] Frame {i + 1}: Invalid JPEG header")
-                    invalid_frames.append(i + 1)
-                    del frame_bytes
-                    continue
+                # Check if it's JPEG format (starts with FF D8 FF)
+                # If not JPEG, the frame might be raw YUV/RGB data from frame processor
+                # decode_image_bytes can handle various formats, so we'll try to decode it
+                is_jpeg = len(frame_bytes) >= 3 and frame_bytes[:3] == b'\xff\xd8\xff'
+                if not is_jpeg:
+                    # Frame is likely raw pixel data (YUV, RGB, etc.) from frame processor
+                    # decode_image_bytes will attempt to decode it
+                    print(f"[AI Route] Frame {i + 1}: Not JPEG format (likely raw pixel data), will attempt decode")
+                    # Continue - decode_image_bytes will try to handle it
                 
                 # Check frame size and resize if too large
                 frame_size_mb = len(frame_bytes) / (1024 * 1024)
@@ -222,8 +232,8 @@ def analyze_video():
         gc.collect()
         
         try:
-            # Analyze the frames (with optional sensor data for quality adjustment)
-            result = vital_signs_service.analyze_video_frames(frames, sensor_data=sensor_data)
+            # Analyze the frames (with optional sensor data and user profile for calibration)
+            result = vital_signs_service.analyze_video_frames(frames, sensor_data=sensor_data, user_profile=user_profile)
             
             analysis_duration = (time.time() - analysis_start_time) * 1000  # Convert to ms
             print(f"[AI Route] Analysis completed in {analysis_duration:.0f}ms")
@@ -253,12 +263,26 @@ def analyze_video():
             gc.collect()
             raise  # Re-raise to be caught by outer exception handler
         
+        # Validate result structure
+        if not isinstance(result, dict):
+            print(f"[AI Route] ERROR: Result is not a dictionary: {type(result)}")
+            raise ValueError(f"Invalid result type from analysis: {type(result)}")
+        
         # Cache result (5 minutes TTL)
         cache_service.set(cache_key, result, 300)
         print("[AI Route] Result cached")
         
-        print(f"[AI Route] Sending response: faceDetected={result['faceDetected']}, "
-              f"totalFrames={result.get('totalFrames', 0)}, hasVitals={bool(result.get('vitals', {}).get('heartRate'))}")
+        # Safely access result fields
+        face_detected = result.get('faceDetected', False)
+        total_frames = result.get('totalFrames', 0)
+        has_vitals = bool(result.get('vitals', {}).get('heartRate'))
+        print(f"[AI Route] Sending response: faceDetected={face_detected}, "
+              f"totalFrames={total_frames}, hasVitals={has_vitals}")
+        
+        # Ensure result has required fields
+        if 'faceDetected' not in result:
+            print("[AI Route] WARNING: Result missing 'faceDetected' key, adding default value")
+            result['faceDetected'] = face_detected
         
         return jsonify({
             'success': True,
@@ -295,6 +319,120 @@ def analyze_video():
             'message': error_msg
         }), 500
 
+
+@app.route('/api/ai/analyze-video-file', methods=['POST'])
+def analyze_video_file():
+    """Analyze a video file for vital signs (video-based pipeline)"""
+    try:
+        if not request.is_json:
+            return jsonify({'error': 'Request must be JSON'}), 400
+        
+        payload = request.get_json()
+        
+        if 'video' not in payload:
+            return jsonify({'error': 'No video data provided'}), 400
+        
+        video_base64 = payload.get('video')
+        mime_type = payload.get('mimeType', 'video/mp4')
+        sensor_data = payload.get('sensorData')
+        user_profile = payload.get('userProfile')
+        
+        print(f"[AI Route] Video file received: {len(video_base64)} base64 chars, type: {mime_type}")
+        
+        # Decode video from base64
+        try:
+            video_bytes = base64.b64decode(video_base64)
+            print(f"[AI Route] Decoded video: {len(video_bytes)} bytes")
+        except Exception as e:
+            print(f"[AI Route] Error decoding video: {str(e)}")
+            return jsonify({'error': f'Invalid video data: {str(e)}'}), 400
+        
+        # Save video to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_video:
+            temp_video.write(video_bytes)
+            temp_video_path = temp_video.name
+        
+        try:
+            # Extract frames from video using OpenCV
+            cap = cv2.VideoCapture(temp_video_path)
+            if not cap.isOpened():
+                return jsonify({'error': 'Failed to open video file'}), 400
+            
+            frames = []
+            frame_count = 0
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0  # Default to 30 FPS if unknown
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            print(f"[AI Route] Video properties: {total_frames} frames, {fps} FPS")
+            
+            # Sample frames at ~10 FPS for analysis (30 FPS video -> sample every 3 frames)
+            # This gives us ~100 frames for a 30-second video, which is enough for accurate HR detection
+            # We'll process all of them since we have the actual video FPS
+            frame_interval = max(1, int(fps / 10))  # Sample at ~10 FPS (every 3 frames for 30 FPS video)
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # Sample frames at the specified interval
+                if frame_count % frame_interval == 0:
+                    # Convert BGR to RGB
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # Convert to PIL Image then to bytes
+                    pil_image = Image.fromarray(frame_rgb)
+                    img_byte_arr = io.BytesIO()
+                    pil_image.save(img_byte_arr, format='JPEG', quality=85)
+                    img_byte_arr = img_byte_arr.getvalue()
+                    frames.append(img_byte_arr)
+                
+                frame_count += 1
+            
+            cap.release()
+            
+            if len(frames) == 0:
+                return jsonify({'error': 'No frames extracted from video'}), 400
+            
+            print(f"[AI Route] Extracted {len(frames)} frames from video at ~{fps/frame_interval:.1f} FPS")
+            
+            # Analyze frames using existing vital signs service
+            # Pass the actual video FPS so it can calculate correctly
+            result = vital_signs_service.analyze_video_frames(
+                frames, 
+                sensor_data=sensor_data, 
+                user_profile=user_profile,
+                video_fps=fps / frame_interval  # Actual FPS of extracted frames
+            )
+            
+            # Ensure result has required fields
+            if not isinstance(result, dict):
+                result = {'faceDetected': False, 'totalFrames': len(frames), 'vitals': {}}
+            if 'faceDetected' not in result:
+                result['faceDetected'] = result.get('validFrames', 0) > 0
+            if 'totalFrames' not in result:
+                result['totalFrames'] = len(frames)
+            
+            return jsonify({
+                'success': True,
+                'result': result
+            })
+            
+        finally:
+            # Clean up temporary video file
+            try:
+                os.unlink(temp_video_path)
+            except:
+                pass
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[AI Route] Video file analysis error: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'error': 'Video analysis failed',
+            'message': error_msg
+        }), 500
 
 @app.route('/api/ai/analyze-image', methods=['POST'])
 def analyze_image():
@@ -350,6 +488,9 @@ def analyze_image():
 @app.route('/api/ai/preventive-health', methods=['POST'])
 def preventive_health():
     """Generate preventive health & lifestyle insights from stored metrics"""
+    import time
+    start_time = time.time()
+    
     try:
         payload = request.get_json()
         if not payload:
@@ -359,17 +500,23 @@ def preventive_health():
         if not metrics or not isinstance(metrics, list):
             return jsonify({'error': 'metrics must be a non-empty list'}), 400
 
+        print(f"[AI Route] Preventive health request: {len(metrics)} metrics, lookback_days={payload.get('lookbackDays', 14)}")
+        
         user_profile = payload.get('userProfile')
         try:
             lookback_days = int(payload.get('lookbackDays', 14))
         except (TypeError, ValueError):
             lookback_days = 14
 
+        print(f"[AI Route] Starting insights generation...")
         result = preventive_health_service.generate_insights(
             metrics=metrics,
             user_profile=user_profile,
             lookback_days=lookback_days
         )
+        
+        elapsed = time.time() - start_time
+        print(f"[AI Route] Insights generation completed in {elapsed:.2f}s")
 
         return jsonify({
             'success': True,
