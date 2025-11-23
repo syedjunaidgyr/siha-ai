@@ -202,7 +202,7 @@ echo -e "${GREEN}Setup complete!${NC}"
 echo ""
 echo "Your AI service should now be running at:"
 echo "  - Internal: http://localhost:3001"
-echo "  - External: http://13.203.161.24:3001"
+echo "  - External: http://35.154.207.79:3001"
 echo ""
 echo "Backend should connect to: http://localhost:3001/api"
 
