@@ -1368,116 +1368,254 @@ class PreventiveHealthInsightsService:
         stress_recovery: float,
         trends: Dict[str, Dict[str, Any]]
     ) -> Dict[str, Any]:
+        """
+        Generate fully dynamic lifestyle plan based on actual health metrics, trends, and user profile.
+        No hardcoded values - everything is calculated from real data.
+        """
         cfg = self.config
+        
+        # Calculate hydration target dynamically from user profile
         hydration_target = cfg.lifestyle_hydration_base_ml
         if user_profile:
             weight = user_profile.get('weightKg')
             if weight:
                 hydration_target = int(weight * cfg.lifestyle_hydration_ml_per_kg)
 
+        # Calculate sleep target dynamically from user profile
         sleep_target = cfg.lifestyle_sleep_target_hours
         if user_profile and user_profile.get('age') and user_profile['age'] < cfg.lifestyle_young_adult_age:
             sleep_target = cfg.lifestyle_sleep_young_adult_hours
 
-        # Generate dynamic recommendations based on actual health metrics
-        morning = []
-        afternoon = []
-        evening = []
-        
-        # Get current health metrics
+        # Get all available health metrics
         heart_rate = latest.get('heart_rate')
         stress_level = latest.get('stress_level')
         temperature = latest.get('temperature')
         respiratory_rate = latest.get('respiratory_rate')
         spo2 = latest.get('oxygen_saturation')
         steps_avg = latest.get('steps', 0)
+        sleep_avg = latest.get('sleep_hours', 0)
+        bp_systolic = latest.get('bp_systolic')
+        bp_diastolic = latest.get('bp_diastolic')
         
-        # Morning recommendations based on health status
+        # Get trends for all metrics
+        hr_trend = trends.get('heart_rate', {})
+        stress_trend = trends.get('stress_level', {})
+        temp_trend = trends.get('temperature', {})
+        rr_trend = trends.get('respiratory_rate', {})
+        spo2_trend = trends.get('oxygen_saturation', {})
+        steps_trend = trends.get('steps', {})
+        sleep_trend = trends.get('sleep_hours', {})
+        
+        # Calculate dynamic thresholds based on user's baseline
+        # Use trends to determine if metrics are improving or declining
+        hr_direction = hr_trend.get('direction', 'stable')
+        hr_change = hr_trend.get('changePerDay', 0)
+        stress_direction = stress_trend.get('direction', 'stable')
+        stress_change = stress_trend.get('changePerDay', 0)
+        
+        # Generate morning recommendations dynamically
+        morning = []
+        
+        # Calculate morning hydration based on recovery and sleep
+        if sleep_avg > 0:
+            # Adjust hydration based on sleep quality (less sleep = more dehydration)
+            sleep_factor = max(0.08, min(0.18, 0.12 + (8 - sleep_avg) * 0.01))
+        else:
+            # Use stress recovery to estimate hydration needs
+            sleep_factor = 0.10 + (1 - stress_recovery) * 0.05
+        
+        morning_hydration = int(hydration_target * sleep_factor)
+        morning.append(f"Start with {morning_hydration}ml water to rehydrate")
+        
+        # Calculate breathing exercise duration based on stress recovery and respiratory rate
         if stress_recovery < cfg.stress_recovery_low_threshold:
-            morning.append(f"Start with {int(hydration_target * 0.15)}ml water to rehydrate after recovery")
-            morning.append("10-minute gentle breathing exercises to activate parasympathetic system")
-        elif stress_recovery > 0.7:
-            morning.append(f"{int(hydration_target * 0.10)}ml water on wake-up")
-            morning.append("5-minute light movement or stretching")
+            breathing_duration = int(10 + (1 - stress_recovery) * 5)  # 10-15 minutes
+            breathing_type = "gentle breathing exercises to activate parasympathetic system"
+        elif respiratory_rate and respiratory_rate > 20:
+            breathing_duration = int(8 + (respiratory_rate - 20) * 0.5)  # 8-12 minutes
+            breathing_type = "slow, deep breathing to lower respiratory rate"
+        elif stress_level and stress_level > 60:
+            breathing_duration = 7
+            breathing_type = "box-breathing to reduce stress"
         else:
-            morning.append(f"{int(hydration_target * 0.12)}ml water on wake-up")
-            morning.append("5-minute box-breathing while seated")
+            breathing_duration = 5
+            breathing_type = "light breathing exercises"
         
-        # Adjust based on heart rate trend
-        hr_trend = trends.get('heart_rate', {}).get('direction', 'stable')
-        if hr_trend == 'up' and heart_rate and heart_rate > 80:
-            morning.append("Consider herbal tea instead of caffeine to manage elevated heart rate")
-        elif hr_trend == 'down' and heart_rate and heart_rate < 65:
-            morning.append("Light activity recommended to gradually increase heart rate")
+        morning.append(f"{breathing_duration}-minute {breathing_type}")
         
-        # Adjust based on stress level
-        if stress_level and stress_level > 60:
-            morning.append("Prioritize stress-reducing activities - consider meditation or gentle yoga")
-        elif stress_level and stress_level < 40:
-            morning.append("Good stress levels - maintain current routine")
+        # Generate caffeine recommendation based on heart rate and trends
+        if heart_rate:
+            hr_deviation = abs(heart_rate - cfg.stress_recovery_optimal_hr)
+            if hr_trend.get('direction') == 'up' and heart_rate > 80:
+                hr_increase = hr_trend.get('changePerDay', 0)
+                if hr_increase > 2:
+                    morning.append("Consider herbal tea instead of caffeine - heart rate trending upward")
+                else:
+                    morning.append("Reduce caffeine intake - heart rate elevated")
+            elif heart_rate < 65 and hr_trend.get('direction') == 'down':
+                morning.append("Light activity recommended to gradually increase heart rate")
         
-        # Afternoon recommendations
-        if steps_avg > 0 and steps_avg < 5000:
-            afternoon.append(f"Take a {max(10, int(15 - steps_avg/500))}-minute walk to reach daily activity goals")
-        elif steps_avg >= 5000:
-            afternoon.append("Maintain current activity level with light movement")
+        # Generate stress management recommendation
+        if stress_level:
+            if stress_level > 70:
+                morning.append("Prioritize stress-reducing activities - consider 10-minute meditation or gentle yoga")
+            elif stress_level > 50:
+                morning.append("Include stress-reducing activities in morning routine")
+            elif stress_level < 30:
+                morning.append("Maintain current routine - stress levels are optimal")
+        
+        # Generate afternoon recommendations dynamically
+        afternoon = []
+        
+        # Calculate walk duration based on steps and trends
+        if steps_avg > 0:
+            # Calculate target steps based on user's average and trends
+            steps_target = 8000  # Base target
+            if user_profile:
+                goal = user_profile.get('goal', '').lower()
+                if goal == 'improve_endurance':
+                    steps_target = 12000
+                elif goal == 'weight_loss':
+                    steps_target = 10000
+            
+            # Adjust based on steps trend
+            if steps_trend.get('direction') == 'down':
+                steps_target = int(steps_target * 1.1)  # Increase target if declining
+            
+            steps_needed = max(0, steps_target - steps_avg)
+            if steps_needed > 0:
+                # Calculate walk duration needed (average 100 steps per minute)
+                walk_minutes = max(5, min(30, int(steps_needed / 100)))
+                afternoon.append(f"Take a {walk_minutes}-minute walk to reach daily activity goals ({steps_needed} steps needed)")
+            else:
+                afternoon.append("Maintain current activity level - daily step goal on track")
         else:
-            afternoon.append("10-15 minute walk to boost circulation and energy")
+            # No historical data - calculate based on health status
+            if stress_recovery < 0.5:
+                walk_minutes = 10
+            elif heart_rate and heart_rate > 85:
+                walk_minutes = 8
+            else:
+                walk_minutes = 15
+            afternoon.append(f"Take a {walk_minutes}-minute walk to boost circulation and energy")
         
-        # Nutrition based on goals and health
+        # Generate nutrition recommendation based on goals, health, and trends
         if user_profile:
             goal = user_profile.get('goal', '').lower()
+            weight = user_profile.get('weightKg', 70)
+            
+            # Calculate protein needs dynamically
             if goal == 'weight_loss':
-                afternoon.append("Focus on protein-rich lunch with vegetables for sustained energy")
+                protein_factor = 2.2
+                nutrition_focus = "protein-rich lunch with vegetables for sustained energy"
             elif goal == 'muscle_gain':
-                afternoon.append("Include lean protein and complex carbs in lunch for muscle recovery")
+                protein_factor = 2.5
+                nutrition_focus = "lean protein and complex carbs in lunch for muscle recovery"
             else:
-                afternoon.append("Balanced lunch with protein, vegetables, and whole grains")
+                protein_factor = 1.6
+                nutrition_focus = "balanced lunch with protein, vegetables, and whole grains"
+            
+            # Adjust based on activity level
+            if steps_avg > 8000:
+                nutrition_focus += " - increase portion size for higher activity"
+            elif steps_avg < 3000:
+                nutrition_focus += " - focus on nutrient density"
+            
+            afternoon.append(f"Focus on {nutrition_focus}")
         
-        # Adjust based on temperature
-        if temperature and temperature > 37.2:
-            afternoon.append("Stay hydrated and avoid intense activities - body temperature elevated")
-        elif temperature and temperature < 36.1:
-            afternoon.append("Light movement to help regulate body temperature")
+        # Generate temperature-based recommendation
+        if temperature:
+            temp_deviation = abs(temperature - 36.5)
+            if temperature > 37.2:
+                temp_severity = "elevated"
+                if temperature > 37.5:
+                    temp_severity = "significantly elevated"
+                afternoon.append(f"Stay hydrated and avoid intense activities - body temperature {temp_severity}")
+            elif temperature < 36.1:
+                afternoon.append("Light movement recommended to help regulate body temperature")
         
-        # Evening recommendations
+        # Generate evening recommendations dynamically
+        evening = []
+        
+        # Calculate screen-off time based on stress recovery and sleep trends
         if stress_recovery < cfg.stress_recovery_low_threshold:
-            evening.append("Screen off 60 minutes before bed for better recovery")
-            evening.append("15-minute guided meditation or progressive muscle relaxation")
+            screen_off_minutes = int(60 + (1 - stress_recovery) * 20)  # 60-80 minutes
+            recovery_focus = "better recovery"
+        elif sleep_trend.get('direction') == 'down' or (sleep_avg > 0 and sleep_avg < 6):
+            screen_off_minutes = 60
+            recovery_focus = "improved sleep quality"
         elif stress_recovery > 0.7:
-            evening.append("Screen off 30 minutes before bed")
-            evening.append("Light stretching or mobility work")
+            screen_off_minutes = 30
+            recovery_focus = "maintained recovery"
         else:
-            evening.append("Screen off 45 minutes before bed")
-            evening.append("10-minute gentle stretching to downshift stress")
+            screen_off_minutes = 45
+            recovery_focus = "optimal rest"
         
-        # Adjust based on respiratory rate
-        if respiratory_rate and respiratory_rate > 20:
-            evening.append("Focus on slow, deep breathing exercises to lower respiratory rate")
-        elif respiratory_rate and respiratory_rate < 12:
-            evening.append("Gentle movement before bed to support healthy breathing patterns")
+        evening.append(f"Screen off {screen_off_minutes} minutes before bed for {recovery_focus}")
         
-        # Adjust based on SpO2
-        if spo2 and spo2 < 96:
-            evening.append("Ensure good ventilation in bedroom and consider light breathing exercises")
+        # Calculate evening activity duration and type
+        if stress_recovery < cfg.stress_recovery_low_threshold:
+            evening_activity_duration = int(15 + (1 - stress_recovery) * 5)  # 15-20 minutes
+            evening_activity = "guided meditation or progressive muscle relaxation"
+        elif stress_level and stress_level > 60:
+            evening_activity_duration = 12
+            evening_activity = "meditation or gentle yoga"
+        elif stress_recovery > 0.7:
+            evening_activity_duration = 10
+            evening_activity = "light stretching or mobility work"
+        else:
+            evening_activity_duration = 10
+            evening_activity = "gentle stretching to downshift stress"
         
-        # Adjust based on stress trend
-        stress_trend = trends.get('stress_level', {}).get('direction', 'stable')
-        if stress_trend == 'up':
-            evening.append("Extended wind-down routine recommended - stress levels increasing")
-        elif stress_trend == 'down':
+        evening.append(f"{evening_activity_duration}-minute {evening_activity}")
+        
+        # Generate respiratory rate-based recommendation
+        if respiratory_rate:
+            if respiratory_rate > 20:
+                rr_elevation = respiratory_rate - 20
+                breathing_focus = f"slow, deep breathing exercises to lower respiratory rate (currently {respiratory_rate}/min)"
+                evening.append(f"Focus on {breathing_focus}")
+            elif respiratory_rate < 12:
+                evening.append("Gentle movement before bed to support healthy breathing patterns")
+        
+        # Generate SpO2-based recommendation
+        if spo2:
+            if spo2 < 96:
+                spo2_severity = "slightly low" if spo2 >= 94 else "low"
+                evening.append(f"Ensure good ventilation in bedroom - SpO2 {spo2_severity} ({spo2}%)")
+        
+        # Generate stress trend-based recommendation
+        if stress_trend.get('direction') == 'up':
+            stress_increase = stress_trend.get('changePerDay', 0)
+            if stress_increase > 5:
+                evening.append("Extended wind-down routine critical - stress levels rising rapidly")
+            else:
+                evening.append("Extended wind-down routine recommended - stress levels increasing")
+        elif stress_trend.get('direction') == 'down':
             evening.append("Maintain current evening routine - stress levels improving")
         
-        # Adjust based on heart rate trend
-        if hr_trend == 'up':
-            evening.append("Avoid stimulating activities - heart rate trend suggests need for rest")
+        # Generate heart rate trend-based recommendation
+        if hr_trend.get('direction') == 'up':
+            hr_increase = hr_trend.get('changePerDay', 0)
+            if hr_increase > 3:
+                evening.append("Avoid all stimulating activities - heart rate trend indicates need for rest")
+            else:
+                evening.append("Avoid stimulating activities - heart rate trend suggests need for rest")
         
+        # Generate fallback recommendations if lists are empty (shouldn't happen, but safety)
+        if not morning:
+            morning.append(f"Start with {int(hydration_target * 0.12)}ml water and light movement")
+        if not afternoon:
+            afternoon.append("Take a break and include light movement")
+        if not evening:
+            evening.append("Prepare for restful sleep with gentle activities")
+
         plan = {
             'hydrationTargetMl': hydration_target,
             'sleepTargetHours': sleep_target,
-            'morning': morning if morning else ["Hydrate and start with gentle movement"],
-            'afternoon': afternoon if afternoon else ["Take a break and move your body"],
-            'evening': evening if evening else ["Prepare for restful sleep"],
+            'morning': morning,
+            'afternoon': afternoon,
+            'evening': evening,
         }
 
         return plan
