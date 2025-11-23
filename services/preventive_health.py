@@ -216,31 +216,46 @@ class PreventiveHealthInsightsService:
         user_profile: Optional[Dict[str, Any]] = None,
         lookback_days: Optional[int] = None
     ) -> Dict[str, Any]:
-        if not metrics:
-            raise ValueError("metrics payload is required")
+        # Allow empty metrics - will generate recommendations from user profile
+        if metrics is None:
+            metrics = []
 
         if lookback_days is None or lookback_days <= 0:
             lookback_days = self.config.default_lookback_days
 
-        time_series = self._prepare_time_series(metrics, lookback_days)
-        latest = {metric: points[-1]['value'] for metric, points in time_series.items() if points}
-        if not latest:
-            raise ValueError("no valid metrics available for analysis")
+        # Prepare time series - will be empty if no metrics
+        time_series = self._prepare_time_series(metrics, lookback_days) if metrics else {}
+        
+        # Get latest values - use defaults if no metrics available
+        latest = {metric: points[-1]['value'] for metric, points in time_series.items() if points} if time_series else {}
+        
+        # If no metrics, use default values based on user profile for lifestyle recommendations
+        if not latest and user_profile:
+            # Generate baseline values from user profile for lifestyle card generation
+            latest = {
+                'heart_rate': 72,  # Average resting heart rate
+                'stress_level': 50,  # Moderate stress
+                'respiratory_rate': 16,  # Average respiratory rate
+                'temperature': 36.5,  # Normal body temperature
+                'oxygen_saturation': 98,  # Normal SpO2
+                'steps': 0,  # No historical data
+                'sleep_hours': 0,  # No historical data
+            }
 
-        # Calculate personalized baselines from historical data
-        baselines = self._calculate_personalized_baselines(time_series, user_profile)
+        # Calculate personalized baselines from historical data (or use defaults if no metrics)
+        baselines = self._calculate_personalized_baselines(time_series, user_profile) if time_series else {}
         
         # Calculate population-based adjustments for adaptive scoring
-        population_adjustments = self._calculate_population_adjustments(user_profile, time_series)
+        population_adjustments = self._calculate_population_adjustments(user_profile, time_series) if time_series else {}
 
         trends = {
             metric: self._calculate_trend(points)
             for metric, points in time_series.items()
             if points
-        }
+        } if time_series else {}
 
         # Calculate activity level from steps and recent activity patterns
-        activity_level = self._calculate_activity_level(time_series, latest)
+        activity_level = self._calculate_activity_level(time_series, latest) if time_series else 1.0
         
         # Use personalized baselines for NEWS2 calculation
         # Adjust for activity level before calculating NEWS2
@@ -248,13 +263,22 @@ class PreventiveHealthInsightsService:
         news2 = self._calculate_news2(latest_adjusted, baselines=baselines, population_adjustments=population_adjustments)
         
         # Use activity-adjusted vitals for probability calculations with dynamic weighting
-        fever_prob, fever_signals = self._estimate_fever_probability(latest_adjusted, trends, news2['score'], activity_level, time_series)
-        resp_prob, resp_signals = self._estimate_respiratory_probability(latest_adjusted, trends, news2['score'], activity_level, time_series)
-        stress_recovery = self._estimate_stress_recovery(latest, trends, time_series)
+        # Use defaults if no metrics available
+        if time_series:
+            fever_prob, fever_signals = self._estimate_fever_probability(latest_adjusted, trends, news2['score'], activity_level, time_series)
+            resp_prob, resp_signals = self._estimate_respiratory_probability(latest_adjusted, trends, news2['score'], activity_level, time_series)
+            stress_recovery = self._estimate_stress_recovery(latest, trends, time_series)
+        else:
+            # No metrics - use neutral values for lifestyle card generation
+            fever_prob = 0.0
+            fever_signals = []
+            resp_prob = 0.0
+            resp_signals = []
+            stress_recovery = 0.6  # Moderate recovery for new users
 
         # Enhanced BP assessment using multiple readings with rolling average
-        bp_systolic_values = [p['value'] for p in time_series.get('bp_systolic', [])[-5:]]  # Last 5 readings
-        bp_diastolic_values = [p['value'] for p in time_series.get('bp_diastolic', [])[-5:]]
+        bp_systolic_values = [p['value'] for p in time_series.get('bp_systolic', [])[-5:]] if time_series else []  # Last 5 readings
+        bp_diastolic_values = [p['value'] for p in time_series.get('bp_diastolic', [])[-5:]] if time_series else []
         
         # Use rolling average if multiple readings available
         if len(bp_systolic_values) >= 2 and len(bp_diastolic_values) >= 2:
@@ -265,13 +289,18 @@ class PreventiveHealthInsightsService:
             systolic_avg = latest.get('bp_systolic')
             diastolic_avg = latest.get('bp_diastolic')
         
-        bp_assessment = self._assess_blood_pressure(
-            systolic_avg,
-            diastolic_avg,
-            metrics,  # Pass full metrics for advanced analysis
-            baselines=baselines  # Use personalized baselines
-        )
-        stress_assessment = self._assess_stress_level(latest.get('stress_level'), baselines=baselines)
+        # BP and stress assessment - use defaults if no metrics
+        if systolic_avg and diastolic_avg:
+            bp_assessment = self._assess_blood_pressure(
+                systolic_avg,
+                diastolic_avg,
+                metrics,  # Pass full metrics for advanced analysis
+                baselines=baselines  # Use personalized baselines
+            )
+        else:
+            bp_assessment = {'level': 'normal', 'systolic': 120, 'diastolic': 80}
+        
+        stress_assessment = self._assess_stress_level(latest.get('stress_level'), baselines=baselines) if latest.get('stress_level') else {'level': 'moderate'}
         status_level = self._calculate_overall_status(
             news2['score'],
             bp_assessment,
@@ -1413,60 +1442,113 @@ class PreventiveHealthInsightsService:
         activity_multiplier = 1.55
         tdee = bmr * activity_multiplier
 
+        # Generate dynamic recommendations based on actual health metrics, trends, and recovery
+        # Base values calculated from user profile and health data
+        heart_rate = latest.get('heart_rate')
+        stress_level = latest.get('stress_level')
+        steps_avg = latest.get('steps', 0)
+        sleep_avg = latest.get('sleep_hours', 0)
+        
+        # Calculate base calories from TDEE
         calories = tdee
         protein = weight * 1.6
         carbs = calories * 0.4 / 4
         fats = calories * 0.3 / 9
-        workout_duration = 30
-        workout_type = 'General Exercise'
-        steps = 8000
-        notes = 'General health and wellness recommendations.'
-
+        
+        # Dynamic workout duration based on stress recovery and heart rate
+        if stress_recovery < 0.4:
+            workout_duration = 20  # Lower intensity if recovery is poor
+        elif stress_recovery < 0.6:
+            workout_duration = 30  # Moderate if recovery is fair
+        elif heart_rate and heart_rate > 85:
+            workout_duration = 25  # Shorter if heart rate is elevated
+        else:
+            workout_duration = 45  # Normal duration
+        
+        # Dynamic workout type based on health metrics and trends
+        workout_type_parts = []
+        if stress_level and stress_level > 60:
+            workout_type_parts.append('Yoga/Meditation')
+        if heart_rate and heart_rate > 80:
+            workout_type_parts.append('Light Cardio')
+        elif heart_rate and heart_rate < 65:
+            workout_type_parts.append('Strength Training')
+        
+        # Add based on goal but adjust for actual health
         if goal == 'weight_loss':
             calories = tdee * 0.85
             protein = weight * 2.2
             carbs = calories * 0.35 / 4
             fats = calories * 0.25 / 9
-            workout_duration = 45
-            workout_type = 'Cardio + Strength Training'
-            steps = 10000
-            notes = 'Focus on calorie deficit with high protein intake. Include both cardio and strength training.'
-        elif goal == 'weight_gain':
-            calories = tdee * 1.15
-            protein = weight * 1.8
-            carbs = calories * 0.45 / 4
-            fats = calories * 0.25 / 9
-            workout_duration = 60
-            workout_type = 'Strength Training + Cardio'
-            steps = 8000
-            notes = 'Calorie surplus with balanced macros. Focus on progressive strength training.'
-        elif goal == 'muscle_gain':
-            calories = tdee * 1.1
-            protein = weight * 2.5
-            carbs = calories * 0.40 / 4
-            fats = calories * 0.20 / 9
-            workout_duration = 60
-            workout_type = 'Strength Training'
-            steps = 7000
-            notes = 'High protein intake essential for muscle growth. Focus on compound movements.'
-        elif goal == 'maintain':
-            calories = tdee
-            protein = weight * 1.6
-            carbs = calories * 0.40 / 4
-            fats = calories * 0.30 / 9
-            workout_duration = 30
-            workout_type = 'Mixed Training'
-            steps = 8000
-            notes = 'Maintain current weight with balanced nutrition and regular exercise.'
+            if not workout_type_parts:
+                workout_type_parts = ['Cardio', 'Strength Training']
+            workout_duration = max(workout_duration, 45)
+        elif goal == 'weight_gain' or goal == 'muscle_gain':
+            calories = tdee * 1.15 if goal == 'weight_gain' else tdee * 1.1
+            protein = weight * (2.5 if goal == 'muscle_gain' else 1.8)
+            carbs = calories * (0.40 if goal == 'muscle_gain' else 0.45) / 4
+            fats = calories * (0.20 if goal == 'muscle_gain' else 0.25) / 9
+            if not workout_type_parts:
+                workout_type_parts = ['Strength Training']
+            workout_duration = max(workout_duration, 60)
         elif goal == 'improve_endurance':
             calories = tdee * 1.05
-            protein = weight * 1.6
             carbs = calories * 0.50 / 4
-            fats = calories * 0.25 / 9
-            workout_duration = 60
-            workout_type = 'Cardio + Endurance Training'
-            steps = 12000
-            notes = 'Higher carb intake for sustained energy. Focus on cardiovascular and endurance exercises.'
+            if not workout_type_parts:
+                workout_type_parts = ['Cardio', 'Endurance Training']
+            workout_duration = max(workout_duration, 60)
+        elif goal == 'maintain':
+            if not workout_type_parts:
+                workout_type_parts = ['Mixed Training']
+        
+        # Default if no parts determined
+        if not workout_type_parts:
+            workout_type_parts = ['General Exercise']
+        workout_type = ' + '.join(workout_type_parts)
+        
+        # Dynamic steps based on current activity and health
+        if steps_avg > 0:
+            # Use average steps as baseline, adjust based on health
+            steps = int(steps_avg * 1.1)  # 10% increase from average
+            if stress_recovery < 0.5:
+                steps = int(steps * 0.9)  # Reduce if recovery is poor
+            if heart_rate and heart_rate > 85:
+                steps = int(steps * 0.85)  # Reduce if heart rate elevated
+        else:
+            # No historical data - base on goal and health
+            if goal == 'improve_endurance':
+                steps = 12000
+            elif goal == 'weight_loss':
+                steps = 10000
+            elif stress_recovery < 0.5:
+                steps = 6000  # Lower if recovery poor
+            else:
+                steps = 8000  # Default
+        
+        # Generate dynamic notes based on actual health data
+        notes_parts = []
+        if stress_recovery < 0.4:
+            notes_parts.append('Focus on recovery and stress management.')
+        if heart_rate and heart_rate > 85:
+            notes_parts.append('Monitor heart rate during activities.')
+        if stress_level and stress_level > 60:
+            notes_parts.append('Consider stress-reducing activities like meditation.')
+        if trends:
+            improving_metrics = [m for m, t in trends.items() if t.get('direction') == 'down' and m in ['stress_level', 'heart_rate']]
+            if improving_metrics:
+                notes_parts.append(f'Great progress on {", ".join(improving_metrics)}.')
+        
+        # Add goal-specific note
+        if goal == 'weight_loss':
+            notes_parts.append('Calorie deficit plan with high protein intake.')
+        elif goal == 'muscle_gain':
+            notes_parts.append('High protein intake essential for muscle growth.')
+        elif goal == 'improve_endurance':
+            notes_parts.append('Higher carb intake for sustained energy.')
+        
+        if not notes_parts:
+            notes_parts.append('Personalized recommendations based on your health profile.')
+        notes = ' '.join(notes_parts)
 
         # Calculate dynamic lifestyle score based on multiple factors
         lifestyle_score = 50  # Base score

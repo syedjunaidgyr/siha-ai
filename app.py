@@ -497,8 +497,11 @@ def preventive_health():
             return jsonify({'error': 'Request body is required'}), 400
 
         metrics = payload.get('metrics')
-        if not metrics or not isinstance(metrics, list):
-            return jsonify({'error': 'metrics must be a non-empty list'}), 400
+        # Allow empty metrics list - AI will generate recommendations from user profile
+        if metrics is None:
+            metrics = []
+        if not isinstance(metrics, list):
+            return jsonify({'error': 'metrics must be a list'}), 400
 
         print(f"[AI Route] Preventive health request: {len(metrics)} metrics, lookback_days={payload.get('lookbackDays', 14)}")
         
