@@ -1941,6 +1941,16 @@ class PreventiveHealthInsightsService:
         sleep_hours = lifestyle_plan.get('sleepTargetHours') if lifestyle_plan else None
         hydration_ml = lifestyle_plan.get('hydrationTargetMl') if lifestyle_plan else None
 
+        # Calculate BMI category
+        if bmi < 18.5:
+            bmi_category = 'underweight'
+        elif 18.5 <= bmi < 25:
+            bmi_category = 'normal'
+        elif 25 <= bmi < 30:
+            bmi_category = 'overweight'
+        else:
+            bmi_category = 'obese'
+        
         return {
             'calorieTarget': int(round(calories)),
             'proteinTarget': round(protein, 1),
@@ -1954,6 +1964,8 @@ class PreventiveHealthInsightsService:
             'score': max(0, min(100, int(round(lifestyle_score)))),
             'notes': notes,
             'goal': goal,
+            'bmi': round(bmi, 1),
+            'bmiCategory': bmi_category,
         }
 
     def _safe_float(self, value: Any, default: Optional[float] = None) -> Optional[float]:
