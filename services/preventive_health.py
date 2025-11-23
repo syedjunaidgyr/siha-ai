@@ -1766,92 +1766,115 @@ class PreventiveHealthInsightsService:
             notes_parts.append('Personalized recommendations based on your health profile.')
         notes = ' '.join(notes_parts)
 
-        # Calculate dynamic lifestyle score based on multiple factors
-        lifestyle_score = 50  # Base score
+        # Calculate dynamic lifestyle score using weighted average approach
+        # Each component contributes a percentage (0-100) that's weighted and averaged
+        # This prevents the score from always maxing out at 100
         
-        # BMI contribution (0-20 points)
+        score_components = []
+        weights = []
+        
+        # BMI contribution (weight: 20%)
         if 18.5 <= bmi <= 24.9:
-            lifestyle_score += 20
+            bmi_score = 100
         elif 24.9 < bmi <= 27:
-            lifestyle_score += 10
+            bmi_score = 75
         elif 27 < bmi <= 30:
-            lifestyle_score += 5
+            bmi_score = 50
         elif bmi < 18.5:
-            lifestyle_score += 5
+            bmi_score = 60  # Underweight is less ideal
         else:  # bmi > 30
-            lifestyle_score -= 5
+            bmi_score = 30
+        score_components.append(bmi_score)
+        weights.append(0.20)
         
-        # Stress recovery contribution (0-20 points)
-        stress_recovery_points = stress_recovery * 20
-        lifestyle_score += stress_recovery_points
+        # Stress recovery contribution (weight: 25%)
+        stress_recovery_score = stress_recovery * 100
+        score_components.append(stress_recovery_score)
+        weights.append(0.25)
         
-        # Vital signs contribution (0-15 points)
+        # Vital signs contribution (weight: 25% total)
         heart_rate = latest.get('heart_rate', 72)
         respiratory_rate = latest.get('respiratory_rate', 16)
         temperature = latest.get('temperature', 36.5)
         spo2 = latest.get('oxygen_saturation', 98)
         
-        # Heart rate score (0-5 points)
+        # Heart rate score (0-100)
         if 60 <= heart_rate <= 100:
-            lifestyle_score += 5
+            hr_score = 100
         elif 50 <= heart_rate < 60 or 100 < heart_rate <= 110:
-            lifestyle_score += 3
+            hr_score = 70
         else:
-            lifestyle_score += 1
+            hr_score = 40
+        score_components.append(hr_score)
+        weights.append(0.08)  # 8% of total
         
-        # Respiratory rate score (0-3 points)
+        # Respiratory rate score (0-100)
         if 12 <= respiratory_rate <= 20:
-            lifestyle_score += 3
+            rr_score = 100
         elif 10 <= respiratory_rate < 12 or 20 < respiratory_rate <= 24:
-            lifestyle_score += 2
+            rr_score = 70
         else:
-            lifestyle_score += 1
+            rr_score = 40
+        score_components.append(rr_score)
+        weights.append(0.05)  # 5% of total
         
-        # Temperature score (0-3 points)
+        # Temperature score (0-100)
         if 36.1 <= temperature <= 37.2:
-            lifestyle_score += 3
+            temp_score = 100
         elif 35.5 <= temperature < 36.1 or 37.2 < temperature <= 37.5:
-            lifestyle_score += 2
+            temp_score = 70
         else:
-            lifestyle_score += 1
+            temp_score = 40
+        score_components.append(temp_score)
+        weights.append(0.05)  # 5% of total
         
-        # SpO2 score (0-4 points)
+        # SpO2 score (0-100)
         if spo2 >= 98:
-            lifestyle_score += 4
+            spo2_score = 100
         elif spo2 >= 96:
-            lifestyle_score += 3
+            spo2_score = 80
         elif spo2 >= 94:
-            lifestyle_score += 2
+            spo2_score = 60
         else:
-            lifestyle_score += 1
+            spo2_score = 30
+        score_components.append(spo2_score)
+        weights.append(0.07)  # 7% of total
         
-        # Blood pressure contribution (0-10 points)
+        # Blood pressure contribution (weight: 10%)
         if bp_assessment:
             bp_level = bp_assessment.get('level', 'normal')
             if bp_level == 'normal':
-                lifestyle_score += 10
+                bp_score = 100
             elif bp_level == 'elevated':
-                lifestyle_score += 7
+                bp_score = 75
             elif bp_level == 'stage1':
-                lifestyle_score += 4
+                bp_score = 50
             elif bp_level == 'stage2':
-                lifestyle_score += 1
+                bp_score = 25
             else:  # crisis
-                lifestyle_score -= 5
+                bp_score = 0
+        else:
+            bp_score = 70  # Unknown = moderate score
+        score_components.append(bp_score)
+        weights.append(0.10)
         
-        # Stress level contribution (0-10 points)
+        # Stress level contribution (weight: 10%)
         if stress_assessment:
-            stress_level = stress_assessment.get('level', 'normal')
-            if stress_level == 'low':
-                lifestyle_score += 10
-            elif stress_level == 'moderate':
-                lifestyle_score += 7
-            elif stress_level == 'elevated':
-                lifestyle_score += 4
+            stress_level_assessment = stress_assessment.get('level', 'moderate')
+            if stress_level_assessment == 'low':
+                stress_score = 100
+            elif stress_level_assessment == 'moderate':
+                stress_score = 70
+            elif stress_level_assessment == 'elevated':
+                stress_score = 40
             else:  # very_high
-                lifestyle_score += 1
+                stress_score = 10
+        else:
+            stress_score = 70  # Unknown = moderate score
+        score_components.append(stress_score)
+        weights.append(0.10)
         
-        # Trends contribution (0-10 points) - improving trends boost score
+        # Trends contribution (weight: 5%) - improving trends boost score
         if trends:
             improving_count = 0
             declining_count = 0
@@ -1868,25 +1891,46 @@ class PreventiveHealthInsightsService:
                     declining_count += 1
             
             if improving_count > declining_count:
-                lifestyle_score += 10
+                trends_score = 100
             elif improving_count == declining_count and improving_count > 0:
-                lifestyle_score += 5
+                trends_score = 70
             elif declining_count > improving_count:
-                lifestyle_score -= 5
+                trends_score = 30
+            else:
+                trends_score = 50  # Stable
+        else:
+            trends_score = 50  # No trends = neutral
+        score_components.append(trends_score)
+        weights.append(0.05)
         
-        # NEWS2 score contribution (0-10 points) - lower is better
+        # NEWS2 score contribution (weight: 5%) - lower is better
         if news2:
-            news2_score = news2.get('score', 0)
-            if news2_score == 0:
-                lifestyle_score += 10
-            elif news2_score <= 2:
-                lifestyle_score += 7
-            elif news2_score <= 4:
-                lifestyle_score += 4
-            elif news2_score <= 6:
-                lifestyle_score += 1
+            news2_score_value = news2.get('score', 0)
+            if news2_score_value == 0:
+                news2_score = 100
+            elif news2_score_value <= 2:
+                news2_score = 80
+            elif news2_score_value <= 4:
+                news2_score = 60
+            elif news2_score_value <= 6:
+                news2_score = 40
             else:  # score >= 7
-                lifestyle_score -= 5
+                news2_score = 20
+        else:
+            news2_score = 70  # Unknown = moderate score
+        score_components.append(news2_score)
+        weights.append(0.05)
+
+        # Calculate weighted average
+        if len(score_components) > 0 and sum(weights) > 0:
+            # Normalize weights to sum to 1.0
+            weight_sum = sum(weights)
+            normalized_weights = [w / weight_sum for w in weights]
+            
+            # Calculate weighted average
+            lifestyle_score = sum(score * weight for score, weight in zip(score_components, normalized_weights))
+        else:
+            lifestyle_score = 50  # Default if no components
 
         # Clamp score between 0 and 100
         lifestyle_score = max(0, min(100, int(round(lifestyle_score))))
